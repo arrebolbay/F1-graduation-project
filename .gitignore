@@ -1,0 +1,21 @@
+# ---- FastF1 缓存(可由脚本联网重建,不入库) ----
+缓存/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ---- Web 运行时产物 ----
+web/.port
+web/history.jsonl
+
+# ---- 系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+.vscode/
+.idea/
