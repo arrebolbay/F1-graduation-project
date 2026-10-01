@@ -179,6 +179,7 @@ class Handler(BaseHTTPRequestHandler):
                     rival_fit_compound=req.get("rival_fit_compound"),
                     rival_fit_wear=req.get("rival_fit_wear", 0),
                     tires=req.get("tires"),
+                    auto_fit=req.get("auto_fit", True),
                 )
                 engine.append_history({
                     "type": "simulate",
@@ -204,6 +205,7 @@ class Handler(BaseHTTPRequestHandler):
                         "my_fit_wear": result["inputs"]["my"]["fit_wear"],
                         "rival_fit_compound": result["inputs"]["rival"]["fit_compound"],
                         "rival_fit_wear": result["inputs"]["rival"]["fit_wear"],
+                        "auto_fit": result.get("fit_mode") == "auto",
                         "tires": req.get("tires"),
                     },
                 })

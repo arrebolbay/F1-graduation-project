@@ -223,6 +223,7 @@ function renderPrerace(d) {
       <span class="tag-soft">${esc(d.mode_name)}</span>
     </div>
     <div class="strategy-text">${esc(d.strategy_text)}</div>
+    ${d.rule_note ? `<div class="rule-inline">&#9432; ${esc(d.rule_note)}</div>` : ""}
     <div class="metrics">
       <div class="metric"><div class="val">${d.stops}</div><div class="lab">停站次数</div></div>
       <div class="metric"><div class="val yellow">L${esc(pitStr)}</div><div class="lab">进站圈</div></div>
@@ -339,6 +340,7 @@ async function runStackelberg() {
     my_fit_wear: myFit ? myFit.wear : 0,
     rival_fit_compound: rvFit ? rvFit.compound : undefined,
     rival_fit_wear: rvFit ? rvFit.wear : 0,
+    auto_fit: $("#st-auto-fit") ? $("#st-auto-fit").checked : true,
     tires: getTires("st"),
   };
   const btn = $("#st-run");
@@ -369,7 +371,7 @@ function renderStackelberg(d) {
       <span class="hero-code">${esc(d.scenario.toUpperCase())}</span>
       <span class="hero-name" style="font-size:18px">${esc(d.scenario_name)}</span>
       <span class="tag-soft">${esc(my.name)}(${esc(my.compound)}·胎龄${my.age}) vs ${esc(rv.name)}(${esc(rv.compound)}·胎龄${rv.age})</span>
-      <span class="tag-soft">进站换上: 我方 ${esc(my.fit_compound)}(磨损${my.fit_wear}圈) / 对手 ${esc(rv.fit_compound)}(磨损${rv.fit_wear}圈)</span>
+      <span class="tag-soft">${d.fit_mode === "auto" ? "系统自动选胎" : "手动选胎"}: 我方 ${esc(my.fit_compound)}(磨损${my.fit_wear}圈) / 对手 ${esc(rv.fit_compound)}(磨损${rv.fit_wear}圈)</span>
       <span class="tag-soft">第 ${d.current_lap} 圈 / 剩余 ${d.remaining} 圈</span>
       <span class="tag-soft">差距 ${d.gap_s > 0 ? "+" : ""}${d.gap_s}s</span>
       <span class="tag-soft">N = ${d.n_sim.toLocaleString()}</span>
@@ -589,6 +591,11 @@ function refillForm(r) {
       renderTireList("st");
       syncFitSelects();
     }
+    const autoEl = $("#st-auto-fit");
+    if (autoEl && p.auto_fit != null) {
+      autoEl.checked = !!p.auto_fit;
+    }
+    syncFitMode();
     if (p.my_fit_compound != null || p.my_fit_wear != null) {
       const hit = TIRE_SETS.st.find((t) =>
         t.compound === p.my_fit_compound && t.wear === (p.my_fit_wear ?? t.wear)
@@ -732,16 +739,16 @@ function renderTireList(which) {
   wrap.innerHTML =
     `<div class="tire-head">
        <span class="tire-count ${nAvail > maxSets ? "over" : ""}">正赛可用 ${nAvail} / ${maxSets} 套</span>
-       <span class="tire-count-note">灰色 = 练习赛已用/已上交,不可勾选</span>
+       <span class="tire-count-note">灰色 = 练习赛后已交还(FIA 30.5i):P1/P2/P3 后各 2 套</span>
      </div>
      <div class="tire-legend"><span>套装</span><span>配方 / 来源</span><span>已用圈数</span><span>可用</span></div>` +
     sets.map((t, i) => `
       <div class="tire-row ${t.available ? "" : "off"} ${t.locked ? "locked" : ""}" data-idx="${i}">
         <span class="tire-idx">${esc(t.id)}</span>
         <span class="comp-chip" style="background:${compColor(t.compound)}">${t.compound}</span>
-        <span class="tire-src">${esc(t.source)}${t.wear > 0 ? ` · 已用${t.wear}圈` : " · 新胎"}${t.locked ? " · 练习套已上交" : ""}</span>
+        <span class="tire-src">${esc(t.source)}${t.wear > 0 ? ` · 已用${t.wear}圈` : " · 新胎"}${t.locked ? " · 已交还" : ""}</span>
         <input class="tire-wear" type="number" min="0" max="77" value="${t.wear}" title="已用圈数(= 装上后初始胎龄)" ${t.locked ? "disabled" : ""}>
-        <label class="tire-avail" title="${t.locked ? "练习赛已用/已上交,不可用于正赛" : "是否可用于正赛"}">
+        <label class="tire-avail" title="${t.locked ? "练习赛后已交还(FIA 30.5i),不可用于正赛" : "是否可用于正赛"}">
           <input type="checkbox" ${t.available ? "checked" : ""} ${t.locked ? "disabled" : ""}>
         </label>
       </div>`).join("");
@@ -767,7 +774,7 @@ function renderTireList(which) {
         const cur = TIRE_SETS[which].filter((x, j) => j !== idx && x.available).length;
         if (e.target.checked && cur >= maxSets) {
           e.target.checked = false;
-          alert(`正赛可用轮胎至多 ${maxSets} 套(练习赛已用/上交 6 套),请先取消勾选其它套装`);
+          alert(`正赛可用轮胎至多 ${maxSets} 套(练习赛后已交还 6 套,FIA 30.5i),请先取消勾选其它套装`);
           return;
         }
         TIRE_SETS[which][idx].available = e.target.checked;
@@ -819,6 +826,20 @@ function findSet(id) {
   return TIRE_SETS.st.find((t) => t.id === id) || null;
 }
 
+function syncFitMode() {
+  const autoEl = $("#st-auto-fit");
+  const auto = autoEl ? autoEl.checked : true;
+  const mySel = $("#st-my-fit"), rvSel = $("#st-rival-fit");
+  if (mySel) mySel.disabled = auto;
+  if (rvSel) rvSel.disabled = auto;
+  const manualWrap = $("#st-fit-manual");
+  if (manualWrap) manualWrap.classList.toggle("dimmed", auto);
+  const note = $("#st-fit-wear-note");
+  if (note && auto) {
+    note.textContent = "自动模式: 系统将从库存中挑选最优套装(含磨损起算胎龄)";
+  }
+}
+
 function updateFitNote() {
   const note = $("#st-fit-wear-note");
   if (!note) return;
@@ -842,6 +863,9 @@ function initTires() {
     const el = $(sel);
     if (el) el.addEventListener("change", updateFitNote);
   });
+  const autoEl = $("#st-auto-fit");
+  if (autoEl) autoEl.addEventListener("change", syncFitMode);
+  syncFitMode();
 }
 
 /* ---------------- 数据总览(站内表格,替代静态图片跳转) ---------------- */

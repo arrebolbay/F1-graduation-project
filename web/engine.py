@@ -458,32 +458,45 @@ def _check_float(name, v, lo, hi):
 
 
 # ----------------------------------------------------------------- 轮胎库存(正赛日套装)
-# 赛事规则口径(简化): 每位车手整个比赛周末 13 套干胎 —— FP1~FP3 练习消耗/上交 6 套,
-# 剩余 7 套供排位+正赛使用(排位 Q1/Q2/Q3 用过的套装带磨损但可用于正赛)。
-# 故正赛可用套装硬上限 = 7 套(RACE_SETS_MAX),且正赛必须至少使用 2 种干地配方。
+# 官方规则口径 —— FIA 2025 F1 运动规则 Article 30(非冲刺周末,适用 2022–2025 摩纳哥):
+#   30.2d)ii) 每车手 13 套干胎 = 2 硬(C3) + 3 中(C4) + 8 软(C5);
+#   30.5i)   其中 1 套 Q3 专用软胎(Q3 前不得使用/交还;Q3 车手排位后交还 1 套软胎)
+#            + 2 套正赛保护套(正赛前不得交还);其余 10 套中 P1/P2/P3 结束后各交还 2 套,
+#            共 6 套上交 → 练习赛后剩 7 套进入排位+正赛(Q3 车手再交还 1 套,剩 6 套)。
+#   30.5m)   摩纳哥特例: 正赛须至少使用 3 套胎(2025 起生效)且至少 2 种干地配方。
+#   30.5c)   装上后驶出维修区即计为"已用"(故排位套带 6~7 圈磨损但仍可用于正赛)。
+# 默认模板 = 模拟生成的"排位赛后常见状态"(Q2 淘汰者 P11–P15 口径,7 套可用):
+#   练习赛大量长距离测试 → FP 长距离套磨损 20+ 圈,排位套 6~7 圈,均按赛制合理量级。
 TIRE_SOURCES = ["新胎", "FP1", "FP2", "FP3", "Q1", "Q2", "Q3"]
 RACE_SETS_MAX = 7
 
-# 默认模板 = 模拟生成的"排位赛后常见状态":
-#   练习套 6 套(locked, 已上交/不可用) + 正赛可用 7 套(排位套带合理磨损圈数)
-#   磨损圈数按赛制合理量级: FP 单节 8~18 圈, Q1/Q2/Q3 单节 5~8 圈。
 TIRE_TEMPLATE = [
-    # ---- 练习赛已用/已上交(锁定,不可用于正赛) ----
-    {"id": "P1", "compound": "C5", "source": "FP1", "wear": 8, "available": False, "locked": True},
-    {"id": "P2", "compound": "C5", "source": "FP2", "wear": 12, "available": False, "locked": True},
-    {"id": "P3", "compound": "C4", "source": "FP1", "wear": 10, "available": False, "locked": True},
-    {"id": "P4", "compound": "C4", "source": "FP2", "wear": 16, "available": False, "locked": True},
-    {"id": "P5", "compound": "C3", "source": "FP2", "wear": 14, "available": False, "locked": True},
-    {"id": "P6", "compound": "C3", "source": "FP3", "wear": 18, "available": False, "locked": True},
+    # ---- 已交还 6 套(P1/P2/P3 后各 2 套,30.5i)iii–v),锁定不可用) ----
+    {"id": "R1", "compound": "C5", "source": "FP1", "wear": 9, "available": False, "locked": True},
+    {"id": "R2", "compound": "C5", "source": "新胎", "wear": 0, "available": False, "locked": True},
+    {"id": "R3", "compound": "C5", "source": "FP2", "wear": 23, "available": False, "locked": True},
+    {"id": "R4", "compound": "C4", "source": "FP1", "wear": 12, "available": False, "locked": True},
+    {"id": "R5", "compound": "C5", "source": "FP3", "wear": 7, "available": False, "locked": True},
+    {"id": "R6", "compound": "C5", "source": "新胎", "wear": 0, "available": False, "locked": True},
     # ---- 正赛可用 7 套(排位赛后常见状态) ----
-    {"id": "T1", "compound": "C5", "source": "新胎", "wear": 0, "available": True, "locked": False},
-    {"id": "T2", "compound": "C5", "source": "Q3", "wear": 6, "available": True, "locked": False},
-    {"id": "T3", "compound": "C5", "source": "Q1", "wear": 7, "available": True, "locked": False},
-    {"id": "T4", "compound": "C4", "source": "新胎", "wear": 0, "available": True, "locked": False},
-    {"id": "T5", "compound": "C4", "source": "Q2", "wear": 7, "available": True, "locked": False},
-    {"id": "T6", "compound": "C3", "source": "新胎", "wear": 0, "available": True, "locked": False},
-    {"id": "T7", "compound": "C3", "source": "新胎", "wear": 0, "available": True, "locked": False},
+    {"id": "T1", "compound": "C5", "source": "新胎", "wear": 0, "available": True, "locked": False},   # Q3 专用套(Q1/Q2 淘汰者未使用)
+    {"id": "T2", "compound": "C5", "source": "Q1", "wear": 6, "available": True, "locked": False},
+    {"id": "T3", "compound": "C5", "source": "Q2", "wear": 7, "available": True, "locked": False},
+    {"id": "T4", "compound": "C4", "source": "新胎", "wear": 0, "available": True, "locked": False},   # 正赛保护套
+    {"id": "T5", "compound": "C4", "source": "新胎", "wear": 0, "available": True, "locked": False},
+    {"id": "T6", "compound": "C3", "source": "新胎", "wear": 0, "available": True, "locked": False},   # 正赛保护套
+    {"id": "T7", "compound": "C3", "source": "FP2", "wear": 21, "available": True, "locked": False},   # FP2 长距离测试后保留
 ]
+
+# 官方规则摘要(随 meta 下发,供前端展示,避免"描述不清")
+TIRE_RULES = {
+    "allocation": "每车手 13 套干胎 = 2 硬(C3) + 3 中(C4) + 8 软(C5)(FIA 30.2d)ii))",
+    "handback": "P1/P2/P3 结束后各交还 2 套(共 6 套);Q3 专用软胎 1 套 + 正赛保护套 2 套不得提前交还(FIA 30.5i))",
+    "race_sets": "练习赛后可用 7 套;晋级 Q3 的车手排位后另交还 1 套软胎,正赛可用 6 套",
+    "monaco_rule": "摩纳哥特例: 正赛至少使用 3 套胎(2025 起)+ 至少 2 种干地配方(FIA 30.5m))",
+    "used_def": "装上后驶出维修区即计为已用:排位套带 6~7 圈磨损但可用于正赛(FIA 30.5c))",
+    "red_flag": "红旗暂停期间可免费更换轮胎(FIA 57.4b)vii));恢复可采静态发车(FIA 58.11)",
+}
 
 
 def default_tires():
@@ -693,6 +706,24 @@ def tire_choice_etime(compound_options, remaining, code, offsets,
                                             params, offsets).sum()), 1)
     return out
 
+def _auto_pick_set(tires, remaining, code, offsets, base):
+    """系统自动换胎: 从可用库存中挑选"跑完剩余圈数期望用时最短"的套装。"""
+    best = None
+    for t in tires:
+        if not t.get("available", True):
+            continue
+        params = STORE.deg_params(code, t["compound"])
+        et = float(lap_profile(t["compound"], t["wear"], max(remaining, 1),
+                               base, params, offsets).sum())
+        if best is None or et < best["etime_s"]:
+            best = {"id": t["id"], "compound": t["compound"],
+                    "source": t["source"], "wear": t["wear"],
+                    "set_label": f"{t['compound']} · {t['source']}"
+                                 f"{' · 已用' + str(t['wear']) + '圈' if t['wear'] else ' · 新胎'}",
+                    "etime_s": round(et, 1)}
+    return best
+
+
 # ----------------------------------------------------------------- 场景模拟入口
 def run_simulation(scenario, my_driver, my_compound, my_age,
                    rival_driver, rival_compound, rival_age,
@@ -700,7 +731,7 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
                    n_sim=None, params=None, seed=None,
                    my_fit_compound=None, my_fit_wear=0,
                    rival_fit_compound=None, rival_fit_wear=0,
-                   tires=None):
+                   tires=None, auto_fit=True):
     """
     Stackelberg 场景蒙特卡洛。返回两个响应分支的成功率与超越圈数统计。
 
@@ -740,14 +771,17 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
     gap_s = _check_float("当前差距", gap_s, -120.0, 120.0)
 
     # 进站换上的轮胎套装(来自轮胎库存,练习/排位后的磨损状态)
-    my_fit_compound = (my_fit_compound or my_compound).strip().upper()
-    rival_fit_compound = (rival_fit_compound or rival_compound).strip().upper()
-    for name, comp in (("换上胎型(我方)", my_fit_compound),
-                       ("换上胎型(对手)", rival_fit_compound)):
-        if comp not in COMPOUNDS:
-            raise ValueError(f"{name} 必须是 {COMPOUNDS} 之一")
-    my_fit_wear = _check_int("换上磨损(我方)", my_fit_wear, 0, TOTAL_LAPS - 1)
-    rival_fit_wear = _check_int("换上磨损(对手)", rival_fit_wear, 0, TOTAL_LAPS - 1)
+    # auto_fit=True(默认): 由系统自动挑选最合理套装,忽略下方手动选择
+    auto_fit = True if auto_fit is None else bool(auto_fit)
+    if not auto_fit:
+        my_fit_compound = (my_fit_compound or my_compound).strip().upper()
+        rival_fit_compound = (rival_fit_compound or rival_compound).strip().upper()
+        for name, comp in (("换上胎型(我方)", my_fit_compound),
+                           ("换上胎型(对手)", rival_fit_compound)):
+            if comp not in COMPOUNDS:
+                raise ValueError(f"{name} 必须是 {COMPOUNDS} 之一")
+        my_fit_wear = _check_int("换上磨损(我方)", my_fit_wear, 0, TOTAL_LAPS - 1)
+        rival_fit_wear = _check_int("换上磨损(对手)", rival_fit_wear, 0, TOTAL_LAPS - 1)
 
     p = _merge_params(params)
     n_sim = _check_int("模拟次数", n_sim or p["n_sim"], 500, 200000)
@@ -768,6 +802,22 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
     rival_base = STORE.base_time(rival_driver)
     my_deg = STORE.deg_params(my_driver, my_compound)
     rival_deg = STORE.deg_params(rival_driver, rival_compound)
+
+    # 系统自动换胎(auto_fit, 默认): 从轮胎库存中挑选"跑完剩余圈数期望用时最短"的套装
+    tires = normalize_tires(tires)
+    auto_info = None
+    if auto_fit:
+        my_pick = _auto_pick_set(tires, remaining, my_driver, offsets, my_base)
+        riv_pick = _auto_pick_set(tires, remaining, rival_driver, offsets, rival_base)
+        if my_pick:
+            my_fit_compound, my_fit_wear = my_pick["compound"], my_pick["wear"]
+        else:
+            my_fit_compound, my_fit_wear = my_compound, my_age
+        if riv_pick:
+            rival_fit_compound, rival_fit_wear = riv_pick["compound"], riv_pick["wear"]
+        else:
+            rival_fit_compound, rival_fit_wear = rival_compound, rival_age
+        auto_info = {"my": my_pick, "rival": riv_pick}
 
     # 进站通道损失: SC 与 VSC 几乎相同 → 合并一档;红旗 = 免费换胎(无损失)
     transit = p["pit_lane_transit"]
@@ -932,6 +982,8 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
         },
         "branches": branches,
         "recommendation": rec,
+        "fit_mode": "auto" if auto_fit else "manual",
+        "auto_fit": auto_info,
         "tire_choice": tire_choice_etime(COMPOUNDS, remaining, my_driver,
                                          offsets, _best_wear_by_compound(tires)),
         "tire_choice_wear": _best_wear_by_compound(tires),
@@ -1087,7 +1139,11 @@ def get_prerace(driver, mode="normal", tires=None):
         "style": m.get("style", "—"),
         "base_time": m.get("base_time", 75.5),
         "mode": mode,
-        "mode_name": "最优策略(正常)" if mode == "normal" else "强制两停",
+        "mode_name": ("最优策略(常规规则: 至少 2 种配方)" if mode == "normal"
+                      else "强制两停(摩纳哥 2025 新规: 至少 3 套胎)"),
+        "rule_note": ("规则约束(FIA 30.5m): 至少使用 2 种干地配方;摩纳哥自 2025 起"
+                      "正赛须至少使用 3 套胎(即至少 2 次进站),「强制两停」模式即按该"
+                      "新规求解。「最优策略」为 2022–2024 常规规则下的最优解。"),
         "strategy_text": _strategy_text(main["stints"]),
         "stops": len(main["stints"]) - 1,
         "total_s": main["total_s"],
@@ -1395,6 +1451,7 @@ def get_meta():
         "scenarios": [{"code": k, **v} for k, v in SCENARIOS.items()],
         "tire_template": default_tires(),
         "tire_sources": TIRE_SOURCES,
+        "tire_rules": TIRE_RULES,
         "race_sets_max": RACE_SETS_MAX,
         "ai_enabled": bool((os.environ.get("F1_AI_API_KEY") or "").strip()),
         "noise": {

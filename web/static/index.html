@@ -66,11 +66,14 @@
       <details class="adv" id="pr-tire-adv">
         <summary>轮胎高级选项 · 练习/排位赛后轮胎状态</summary>
         <p class="fld-hint">
-          车手比赛周末共 13 套干胎: FP1~FP3 练习消耗/上交 6 套(灰色锁定行,
-          不可勾选),正赛可用 <b>至多 7 套</b>(勾选超 7 套会被拦截)。默认即
-          "排位赛后常见状态"(Q1/Q2/Q3 套带 6~7 圈合理磨损,其余新胎)。
-          "已用圈数"作为该套装装上后的初始胎龄参与 DP;正赛还需满足
-          "至少使用 2 种干地配方"规则。DP 会把具体套装分配到各 stint。
+          <b>官方规则(FIA 2025 运动规则 Art.30):</b> 每车手 13 套干胎 =
+          2 硬(C3) + 3 中(C4) + 8 软(C5);P1/P2/P3 结束后各交还 2 套(灰色锁定行,
+          共 6 套),故正赛可用 <b>至多 7 套</b>(勾选超 7 套会被拦截;晋级 Q3 的车手
+          排位后另交还 1 套软胎,正赛为 6 套)。默认即"排位赛后常见状态":
+          FP 长距离测试套带 20+ 圈磨损、排位套 6~7 圈、其余新胎。
+          <b>"已用圈数"</b> = 该套装装上后的初始胎龄(驶出维修区即计为已用,FIA 30.5c));
+          正赛须满足"至少 2 种干地配方",摩纳哥 2025 起还须"至少 3 套胎"。
+          DP 会把具体套装自动分配到各 stint。
         </p>
         <div class="tire-list" id="pr-tire-list"></div>
         <div class="btn-row" style="margin-top:8px">
@@ -189,28 +192,36 @@
       <details class="adv" id="st-tire-adv">
         <summary>轮胎高级选项 · 轮胎状态与进站换胎</summary>
         <p class="fld-hint">
-          轮胎库存 = 练习赛/排位赛后全部干胎状态(13 套 = 练习消耗 6 套锁定 +
-          正赛可用至多 7 套);"已用圈数"是该套装装上后的初始胎龄。
-          "进站换上"决定 Undercut/Overcut/SC·VSC/红旗各分支进站(或红旗免费换胎)
-          时实际装的套装(默认取该配方磨损最小的可用套装,不再假定全新胎)。
+          <b>官方规则(FIA 2025 运动规则 Art.30):</b> 13 套干胎 = 2 硬 + 3 中 + 8 软,
+          P1/P2/P3 后各交还 2 套(灰色锁定行) → 正赛可用至多 7 套。
+          <b>"已用圈数"</b> = 该套装装上后的初始胎龄;默认为"排位赛后常见状态"
+          (FP 长距离套 20+ 圈、排位套 6~7 圈)。
+          下方"进站换上"决定各分支进站(或红旗免费换胎)时实际装的套装:
+          勾选<b>"系统自动选择"</b>时按期望用时最短自动挑选;取消勾选则可手动指定。
         </p>
         <div class="tire-list" id="st-tire-list"></div>
         <div class="btn-row" style="margin:8px 0">
           <button type="button" class="btn-ghost" id="st-tire-reset">恢复默认状态</button>
           <button type="button" class="btn-ghost" id="st-tire-fresh">全部设为新胎</button>
         </div>
-        <div class="grid3">
+        <div class="fit-auto-row">
+          <label class="fit-auto">
+            <input type="checkbox" id="st-auto-fit" checked>
+            <span><b>由系统自动选择最合理的轮胎(推荐)</b> —— 按"跑完剩余圈数期望用时最短"从库存自动挑选换上套装</span>
+          </label>
+        </div>
+        <div class="grid3" id="st-fit-manual">
           <div>
-            <label class="fld-label" for="st-my-fit">我方进站换上</label>
+            <label class="fld-label" for="st-my-fit">我方进站换上 <small class="fld-mini">取消上方勾选后可改</small></label>
             <select id="st-my-fit" class="fld"></select>
           </div>
           <div>
-            <label class="fld-label" for="st-rival-fit">对手进站换上</label>
+            <label class="fld-label" for="st-rival-fit">对手进站换上 <small class="fld-mini">取消上方勾选后可改</small></label>
             <select id="st-rival-fit" class="fld"></select>
           </div>
           <div>
-            <label class="fld-label" for="st-fit-wear-note">&nbsp;</label>
-            <p class="fld-hint" id="st-fit-wear-note">选择套装后自动带出磨损圈数</p>
+            <label class="fld-label">&nbsp;</label>
+            <p class="fld-hint" id="st-fit-wear-note">自动模式: 系统将从库存中挑选最优套装(含磨损起算胎龄)</p>
           </div>
         </div>
       </details>

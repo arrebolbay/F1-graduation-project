@@ -811,3 +811,33 @@ input.fld[type="number"] { font-variant-numeric: tabular-nums; }
 }
 .tire-row.locked input { cursor: not-allowed; }
 
+/* ---------------- 换胎自动/手动选择 ---------------- */
+.fit-auto-row {
+  margin: 10px 0 6px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--red, #e10600);
+  border-radius: 6px;
+  background: rgba(225, 6, 0, 0.06);
+}
+.fit-auto {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.fit-auto input { accent-color: var(--red, #e10600); margin-top: 3px; cursor: pointer; }
+#st-fit-manual.dimmed { opacity: 0.45; pointer-events: none; }
+.rule-inline {
+  margin: 8px 0 4px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--yellow, #ffd24d);
+  background: rgba(255, 210, 77, 0.08);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text, #e8ecf5);
+}
+
