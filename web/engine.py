@@ -58,6 +58,7 @@ DEFAULT_PARAMS = {
     "pit_abnormal_std": 2.0,         # 异常换胎耗时标准差(秒)
     "compound_offset": {"C3": 1.0, "C4": 0.0, "C5": -0.5},  # 配方速度偏移(秒)
     "lap_noise_std": 1.05,           # 单圈随机波动 σ(秒),数据标定值
+    "form_noise_std": 0.20,          # "当日状态"相关波动 σ(秒/圈,整段恒定,防胜率饱和)
     "red_restart_gain": 0.35,        # 红旗静态发车新胎抓地增益(秒/圈)
     "red_restart_laps": 2,           # 发车增益持续圈数
     "pit_reaction_laps": 2,          # 跟进进站反应延迟(圈,Undercut/Overcut 机制来源)
@@ -364,9 +365,14 @@ def sample_pit_times(rng, n, transit, p):
 
 
 # ----------------------------------------------------------------- 蒙特卡洛
-def _run_branch(rng, n_sim, remaining, lt_me, lt_riv, t0_me, t0_riv, noise_me, noise_riv):
+def _run_branch(rng, n_sim, remaining, lt_me, lt_riv, t0_me, t0_riv,
+                noise_me, noise_riv, form_me=0.0, form_riv=0.0):
     """
-    逐圈推进两车"距完赛时间",每圈圈速叠加独立正态波动(σ 为车手级实测标定值),
+    逐圈推进两车"距完赛时间",圈速随机性分两层:
+      - 逐圈独立噪声 N(0, σ_lap²)(FastF1 实测标定);
+      - "当日状态"相关项 N(0, σ_form²) —— 每车每次模拟抽取一次、整段恒定
+        的圈速偏移,补偿独立噪声对"整段节奏波动"(交通/状态/赛道演变)的低估,
+        避免总时间分布过窄导致胜率饱和到 0%/100%。
     记录:
       success     最终我方先完赛
       overtake    我方永久反超圈 = 最后一次落后之后的第1圈(0=自始至终领先)
@@ -380,9 +386,13 @@ def _run_branch(rng, n_sim, remaining, lt_me, lt_riv, t0_me, t0_riv, noise_me, n
     last_ahead = np.where(ahead0, 0, -1)     # 我方领先的最后圈号
     swapped = np.zeros(n_sim, dtype=bool)
     order = ahead0.copy()
+    form_m = rng.normal(0, form_me, n_sim) if form_me > 0 else 0.0
+    form_r = rng.normal(0, form_riv, n_sim) if form_riv > 0 else 0.0
     for k in range(remaining):
-        add_me = lt_me[k] if noise_me <= 0 else lt_me[k] + rng.normal(0, noise_me, n_sim)
-        add_riv = lt_riv[k] if noise_riv <= 0 else lt_riv[k] + rng.normal(0, noise_riv, n_sim)
+        add_me = (lt_me[k] + form_m if noise_me <= 0
+                  else lt_me[k] + form_m + rng.normal(0, noise_me, n_sim))
+        add_riv = (lt_riv[k] + form_r if noise_riv <= 0
+                   else lt_riv[k] + form_r + rng.normal(0, noise_riv, n_sim))
         t_me += add_me
         t_riv += add_riv
         now_ahead = t_me < t_riv
@@ -459,6 +469,7 @@ def _merge_params(overrides):
     for k in ("pit_lane_transit", "pit_lane_transit_scvsc", "pit_lane_transit_red",
               "pit_normal_prob", "pit_normal_mean", "pit_normal_std",
               "pit_abnormal_mean", "pit_abnormal_std", "lap_noise_std",
+              "form_noise_std",
               "red_restart_gain", "red_restart_laps", "pit_reaction_laps",
               "n_sim"):
         if overrides.get(k) is not None:
@@ -910,6 +921,7 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
     else:
         sigma_me = sigma_riv = max(0.0, float(p["lap_noise_std"]))
         noise_mode = "manual"
+    form_std = max(0.0, float(p["form_noise_std"]))
 
     my_base = STORE.base_time(my_driver)
     rival_base = STORE.base_time(rival_driver)
@@ -1047,7 +1059,8 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
                             "laps": min(n_gain, remaining)}
 
         success, overtake, overtaken, swapped, delta = _run_branch(
-            rng, n_sim, remaining, lt_me, lt_riv, t0_me, t0_riv, sigma_me, sigma_riv)
+            rng, n_sim, remaining, lt_me, lt_riv, t0_me, t0_riv,
+            sigma_me, sigma_riv, form_std, form_std)
         stats = _branch_stats(success, overtake, overtaken, swapped, delta, remaining)
         med = stats["overtake_median"]
         if med is None:
@@ -1062,6 +1075,7 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
             "my_pit": me_pit, "rival_pit": riv_pit,
             "pos_note": pos_note,
             "restart_gain": restart_gain,
+            "cfg": [me_pit, riv_pit, my_a0, riv_a0, dly_me, dly_riv],
             **stats,
         })
 
@@ -1070,11 +1084,78 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
     lt_riv0 = profile(rival_compound, rival_age, rival_base, rival_deg)
     s0, _, _, _, d0 = _run_branch(
         rng, n_sim, remaining, lt_me0, lt_riv0,
-        np.zeros(n_sim), np.full(n_sim, float(gap_s)), sigma_me, sigma_riv)
+        np.zeros(n_sim), np.full(n_sim, float(gap_s)),
+        sigma_me, sigma_riv, form_std, form_std)
     baseline_rate = round(float(s0.mean()) * 100.0, 2)
     for b in branches:
         b["baseline_rate"] = baseline_rate
         b["strategy_gain_pp"] = round(b["success_rate"] - baseline_rate, 2)
+
+    best = max(branches, key=lambda b: b["success_rate"])
+
+    # ---- 鲁棒性检验: 各分支在关键参数扰动下的成功率区间(小样本复算)
+    def _robust_rate(cfg, mod_deg=1.0, base_shift=0.0, gap_shift=0.0,
+                     noise_mult=1.0, n=3000, seed=20261001):
+        rng2 = np.random.default_rng(seed)
+        me_pit, riv_pit, my_a0, riv_a0, dly_me, dly_riv = cfg
+
+        def prof2(comp, age, base, code):
+            dp = dict(STORE.deg_params(code, comp))
+            dp["deg"] = dp["deg"] * mod_deg
+            return profile(comp, age, base + base_shift, dp)
+
+        def build2(pit, delay, cur_comp, cur_age, fit_comp, fit_wear, base, code):
+            if not pit:
+                return prof2(cur_comp, cur_age, base, code)
+            if delay > 0 and delay < remaining:
+                pre = prof2(cur_comp, cur_age, base, code)[:delay]
+                post = prof2(fit_comp, fit_wear, base, code)
+                return np.concatenate([pre, post])[:remaining]
+            return prof2(fit_comp, fit_wear, base, code)
+
+        lt_me = build2(me_pit, dly_me, my_compound,
+                       my_age if (me_pit and dly_me) else my_a0,
+                       my_fit_compound, my_fit_wear, my_base, my_driver)
+        lt_riv = build2(riv_pit, dly_riv, rival_compound,
+                        rival_age if (riv_pit and dly_riv) else riv_a0,
+                        rival_fit_compound, rival_fit_wear, rival_base,
+                        rival_driver)
+        if me_pit:
+            t0_me2 = sample_pit_times(rng2, n, transit, p)
+        else:
+            t0_me2 = np.zeros(n)
+        if riv_pit:
+            t0_riv2 = sample_pit_times(rng2, n, transit, p) + (gap_s + gap_shift)
+        else:
+            t0_riv2 = np.full(n, gap_s + gap_shift)
+        s, *_ = _run_branch(rng2, n, remaining, lt_me, lt_riv, t0_me2, t0_riv2,
+                            sigma_me * noise_mult, sigma_riv * noise_mult,
+                            form_std * noise_mult, form_std * noise_mult)
+        return round(float(s.mean()) * 100.0, 2)
+
+    rob_cases = [
+        ("名义(复核)", {}),
+        ("衰减斜率 −20%", {"mod_deg": 0.8}),
+        ("衰减斜率 +20%", {"mod_deg": 1.2}),
+        ("我方圈速 −0.3s/圈", {"base_shift": -0.3}),
+        ("我方圈速 +0.3s/圈", {"base_shift": 0.3}),
+        ("差距 −2s(更落后)", {"gap_shift": -2.0}),
+        ("差距 +2s(更领先)", {"gap_shift": 2.0}),
+        ("波动 σ ×1.5", {"noise_mult": 1.5}),
+    ]
+    for b in branches:
+        rl = [{"name": nm, "success_rate": _robust_rate(b["cfg"], **kw)}
+              for nm, kw in rob_cases]
+        rates = [c["success_rate"] for c in rl]
+        b["robustness"] = {"min": min(rates), "max": max(rates),
+                           "range": round(max(rates) - min(rates), 1)}
+        b["_rob_cases"] = rl
+    robustness = {
+        "branch": best["label"], "cases": best.get("_rob_cases") or [],
+        "nominal": best["success_rate"],
+        "min": best["robustness"]["min"], "max": best["robustness"]["max"],
+        "range": best["robustness"]["range"],
+    }
 
     # ---- 圈速差拆解(为何胜率高/低): 基准圈速差 + 换上套装期望差
     pace_note = (
@@ -1084,14 +1165,15 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
         f"换上: 我方 {my_fit_compound}(磨损{my_fit_wear}圈) vs "
         f"对手 {rival_fit_compound}(磨损{rival_fit_wear}圈)")
 
-    best = max(branches, key=lambda b: b["success_rate"])
     rec = {"branch": best["key"], "label": best["label"],
            "success_rate": best["success_rate"],
            "baseline_rate": baseline_rate,
            "strategy_gain_pp": best["strategy_gain_pp"],
            "risk_level": best["risk_level"],
            "relost_rate": best["relost_rate"],
-           "swap_rate": best["swap_rate"]}
+           "swap_rate": best["swap_rate"],
+           "robustness": {"min": robustness["min"], "max": robustness["max"],
+                          "range": robustness["range"]}}
     risk_txt = (f"被反超风险{best['risk_level']}"
                 f"(曾领先后得而复失 {best['relost_rate']:.1f}%)")
     gain_txt = f"(不动基线 {baseline_rate:.1f}%,策略增益 {best['strategy_gain_pp']:+.1f}pp)"
@@ -1122,6 +1204,7 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
         "rule_note": rule_note,
         "baseline": {"label": "双方均不进站(基线)", "success_rate": baseline_rate},
         "pace_note": pace_note,
+        "robustness": robustness,
         "inputs": {
             "my": {"driver": my_driver,
                    "name": DRIVER_NAMES.get(my_driver, my_driver),
@@ -1153,6 +1236,7 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
             "my_sigma": sigma_me,
             "rival_sigma": sigma_riv,
             "noise_mode": noise_mode,
+            "form_noise_std": round(float(p["form_noise_std"]), 3),
             "red_restart_gain": p["red_restart_gain"] if scenario == "red" else None,
             "red_restart_laps": int(p["red_restart_laps"]) if scenario == "red" else None,
             "pit_reaction_laps": int(p["pit_reaction_laps"]),
@@ -1470,6 +1554,11 @@ def _result_digest(result):
             f"{b.get('pos_note') or ''}")
     if result.get("pace_note"):
         lines.append(f"圈速差拆解: {result['pace_note']}")
+    rb = result.get("robustness") or {}
+    if rb:
+        lines.append(f"鲁棒性: 最优分支「{rb.get('branch')}」名义 {rb.get('nominal')}%,"
+                     f"关键参数扰动下区间 {rb.get('min')}%~{rb.get('max')}%"
+                     f"(跨度 {rb.get('range')}pp,越窄越可靠)")
     pu = result.get("params_used", {}) or {}
     lines.append(f"圈速波动 σ: 我方 {pu.get('my_sigma')}s / 对手 {pu.get('rival_sigma')}s"
                  f"({pu.get('noise_mode')},实测标定近似正态)")

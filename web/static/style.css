@@ -851,3 +851,37 @@ input.fld[type="number"] { font-variant-numeric: tabular-nums; }
   margin: 8px 0 4px;
 }
 
+/* ---------------- 鲁棒性检验 ---------------- */
+.rob-range {
+  margin: 8px 0 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.rob-range b { color: var(--yellow, #ffd24d); }
+.rob-list { display: flex; flex-direction: column; gap: 6px; }
+.rob-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 58px;
+  align-items: center;
+  gap: 10px;
+}
+.rob-name { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.rob-bar {
+  height: 10px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+.rob-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #3f8cff, #23d18b);
+}
+.rob-val {
+  font-size: 11.5px;
+  font-weight: 800;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+

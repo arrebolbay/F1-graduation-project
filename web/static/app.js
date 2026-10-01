@@ -314,6 +314,7 @@ function readSimParams() {
     red_restart_gain: num("#st-red-gain", 0.35),
     red_restart_laps: num("#st-red-laps", 2),
     pit_reaction_laps: num("#st-react-laps", 2),
+    form_noise_std: num("#st-form-noise", 0.2),
     lap_noise_std: noiseRaw === "" ? null : num("#st-noise", null),
     compound_offset: {
       C5: num("#off-C5", -0.5),
@@ -387,6 +388,8 @@ function renderStackelberg(d) {
   const branchesHtml = d.branches.map((b) => {
     const isBest = b.key === bestKey;
     const rate = b.success_rate;
+    const se = (100 * Math.sqrt(Math.max(rate, 0.01) / 100 *
+      (1 - Math.min(rate, 99.99) / 100) / Math.max(d.n_sim, 1))).toFixed(1);
     const otBox = (b.overtake_mean != null && (b.overtake_median || 0) > 0)
       ? `<div class="overtake-box">
            <div><div class="lab">若成功,完成超越约需</div></div>
@@ -406,6 +409,7 @@ function renderStackelberg(d) {
         <span class="risk-item">得而复失 <b>${(b.relost_rate ?? 0).toFixed(1)}%</b></span>
         <span class="risk-item">策略增益 <b>${(b.strategy_gain_pp ?? 0) > 0 ? "+" : ""}${(b.strategy_gain_pp ?? 0).toFixed(1)}pp</b></span>
         <span class="risk-item">不动基线 <b>${(b.baseline_rate ?? 0).toFixed(1)}%</b></span>
+        <span class="risk-item">扰动区间 <b>${b.robustness ? `${b.robustness.min.toFixed(1)}~${b.robustness.max.toFixed(1)}%` : "—"}</b></span>
         <span class="risk-item">翻转频繁度 <b>${(b.swap_rate ?? 0).toFixed(1)}%</b></span>
       </div>`;
     const gainBox = b.restart_gain ? `
@@ -422,7 +426,7 @@ function renderStackelberg(d) {
         <div class="branch-desc">${esc(b.desc)}</div>
         <div class="rate-row">
           <span class="rate-val ${rateClass(rate)}">${rate.toFixed(1)}</span>
-          <span class="rate-unit">% 成功率 · ${b.n_success.toLocaleString()}/${d.n_sim.toLocaleString()} 次</span>
+          <span class="rate-unit">% 成功率 ±${se}pp · ${b.n_success.toLocaleString()}/${d.n_sim.toLocaleString()} 次</span>
         </div>
         <div class="rate-bar"><i style="width:${Math.max(rate, 0.5)}%"></i></div>
         ${riskBox}
@@ -458,6 +462,7 @@ function renderStackelberg(d) {
     red_restart_gain: "红旗发车增益",
     red_restart_laps: "发车增益圈数",
     pit_reaction_laps: "跟进反应延迟",
+    form_noise_std: "当日状态σ",
   };
   const chips = Object.entries(d.params_used || {}).filter(([, v]) => v != null).map(([k, v]) => {
     const text = (k === "compound_offset")
@@ -485,10 +490,32 @@ function renderStackelberg(d) {
       <div class="branch-note"><b>战略解读:</b> ${esc(inf.strategy_read)}</div>
     </div>` : "";
 
+  const rob = d.robustness;
+  const robBox = rob ? `
+    <div class="card">
+      <h3>鲁棒性检验 <small style="color:var(--muted);font-weight:400">最优分支「${esc(rob.branch)}」在关键参数扰动下的成功率</small></h3>
+      <div class="rob-range">名义 <b>${rob.nominal.toFixed(1)}%</b> ·
+        扰动区间 <b>${rob.min.toFixed(1)}% ~ ${rob.max.toFixed(1)}%</b> ·
+        跨度 <b>${rob.range.toFixed(1)}pp</b>
+        <span class="risk-item">(${rob.range <= 15 ? "结论较稳健" : rob.range <= 30 ? "结论中等稳健" : "结论对参数敏感,需谨慎采信"})</span>
+      </div>
+      <div class="rob-list">
+        ${rob.cases.map((c) => `
+          <div class="rob-row">
+            <span class="rob-name">${esc(c.name)}</span>
+            <div class="rob-bar"><i style="width:${Math.max(c.success_rate, 0.5)}%"></i></div>
+            <span class="rob-val">${c.success_rate.toFixed(1)}%</span>
+          </div>`).join("")}
+      </div>
+      <p class="fld-hint" style="margin-top:8px">扰动项: 衰减斜率 ±20% / 基准圈速 ±0.3s/圈 / 差距 ±2s / 波动 σ×1.5;
+        区间越窄,单点成功率越可信 —— 这是模型鲁棒性的直接度量。</p>
+    </div>` : "";
+
   $("#st-results").innerHTML = `
     <div class="card">${summary}</div>
     ${infBox}
     <div class="branch-grid">${branchesHtml}</div>
+    ${robBox}
     ${ruleBox}
     <div class="card">
       <h3>轮胎配方选择 <small style="color:var(--muted);font-weight:400">我方 ${esc(my.name)} 从库存最优套装起步跑完剩余 ${d.remaining} 圈的期望用时</small></h3>
@@ -658,6 +685,7 @@ function resetAdvParams() {
   $("#st-red-gain").value = d.red_restart_gain ?? 0.35;
   $("#st-red-laps").value = d.red_restart_laps ?? 2;
   $("#st-react-laps").value = d.pit_reaction_laps ?? 2;
+  $("#st-form-noise").value = d.form_noise_std ?? 0.2;
   $("#st-noise").value = "";   // 留空 = 车手级实测 σ 自动标定
   const off = d.compound_offset || {};
   $("#off-C5").value = off.C5 ?? -0.5;
