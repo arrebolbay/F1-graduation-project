@@ -313,6 +313,7 @@ function readSimParams() {
     pit_abnormal_std: num("#st-abn-std", 2.0),
     red_restart_gain: num("#st-red-gain", 0.35),
     red_restart_laps: num("#st-red-laps", 2),
+    pit_reaction_laps: num("#st-react-laps", 2),
     lap_noise_std: noiseRaw === "" ? null : num("#st-noise", null),
     compound_offset: {
       C5: num("#off-C5", -0.5),
@@ -377,6 +378,7 @@ function renderStackelberg(d) {
       <span class="tag-soft">差距 ${d.gap_s > 0 ? "+" : ""}${d.gap_s}s</span>
       <span class="tag-soft">N = ${d.n_sim.toLocaleString()}</span>
     </div>
+    ${d.pace_note ? `<div class="branch-note" style="margin-top:8px">&#9432; 圈速差拆解 —— ${esc(d.pace_note)}</div>` : ""}
     <div class="rec-banner" style="margin-top:12px">
       <span class="rec-icon">&#9654;</span>
       <span>${esc(d.recommendation.text)}</span>
@@ -401,9 +403,10 @@ function renderStackelberg(d) {
     const riskBox = `
       <div class="risk-row">
         <span class="risk-chip ${riskClass}">被反超风险 ${esc(b.risk_level || "—")}</span>
-        <span class="risk-item">曾领先被反超 <b>${(b.overtaken_rate ?? 0).toFixed(1)}%</b></span>
-        <span class="risk-item">位置翻转 <b>${(b.swap_rate ?? 0).toFixed(1)}%</b></span>
-        <span class="risk-item">最终丢位置 <b>${(b.loss_rate ?? 0).toFixed(1)}%</b></span>
+        <span class="risk-item">得而复失 <b>${(b.relost_rate ?? 0).toFixed(1)}%</b></span>
+        <span class="risk-item">策略增益 <b>${(b.strategy_gain_pp ?? 0) > 0 ? "+" : ""}${(b.strategy_gain_pp ?? 0).toFixed(1)}pp</b></span>
+        <span class="risk-item">不动基线 <b>${(b.baseline_rate ?? 0).toFixed(1)}%</b></span>
+        <span class="risk-item">翻转频繁度 <b>${(b.swap_rate ?? 0).toFixed(1)}%</b></span>
       </div>`;
     const gainBox = b.restart_gain ? `
       <div class="branch-note">静态发车增益: 我方 <b>-${b.restart_gain.my.toFixed(2)}s/圈</b> ·
@@ -454,6 +457,7 @@ function renderStackelberg(d) {
     noise_mode: "σ来源",
     red_restart_gain: "红旗发车增益",
     red_restart_laps: "发车增益圈数",
+    pit_reaction_laps: "跟进反应延迟",
   };
   const chips = Object.entries(d.params_used || {}).filter(([, v]) => v != null).map(([k, v]) => {
     const text = (k === "compound_offset")
@@ -653,6 +657,7 @@ function resetAdvParams() {
   $("#st-abn-std").value = d.pit_abnormal_std ?? 2.0;
   $("#st-red-gain").value = d.red_restart_gain ?? 0.35;
   $("#st-red-laps").value = d.red_restart_laps ?? 2;
+  $("#st-react-laps").value = d.pit_reaction_laps ?? 2;
   $("#st-noise").value = "";   // 留空 = 车手级实测 σ 自动标定
   const off = d.compound_offset || {};
   $("#off-C5").value = off.C5 ?? -0.5;

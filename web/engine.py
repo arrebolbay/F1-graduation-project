@@ -60,6 +60,7 @@ DEFAULT_PARAMS = {
     "lap_noise_std": 1.05,           # 单圈随机波动 σ(秒),数据标定值
     "red_restart_gain": 0.35,        # 红旗静态发车新胎抓地增益(秒/圈)
     "red_restart_laps": 2,           # 发车增益持续圈数
+    "pit_reaction_laps": 2,          # 跟进进站反应延迟(圈,Undercut/Overcut 机制来源)
     "n_sim": 10000,                  # 蒙特卡洛次数
 }
 
@@ -397,16 +398,26 @@ def _run_branch(rng, n_sim, remaining, lt_me, lt_riv, t0_me, t0_riv, noise_me, n
 
 
 def _branch_stats(success, overtake, overtaken, swapped, delta, remaining):
-    """单分支统计: 成功率 + 反超/被反超圈数分布 + 被反超风险。"""
+    """单分支统计: 成功率 + 得而复失风险 + 反超圈数分布。
+
+    风险口径: "被反超风险" = 得而复失率 = P(曾领先却最终丢位置 | 曾获得位置优势);
+    swap_rate 仅为"位置翻转频繁度"参考(包含我方成功超越造成的翻转,不计入风险)。
+    """
     n = len(success)
     n_succ = int(success.sum())
+    gained = success | (overtaken > 0)          # 曾获得位置优势的样本
+    n_gained = int(gained.sum())
+    n_relost = int((overtaken > 0).sum())       # 曾领先但最终丢掉(得而复失)
+    relost_rate = (n_relost / n_gained * 100.0) if n_gained else 0.0
     stats = {
         "success_rate": round(n_succ / n * 100.0, 2) if n else 0.0,
         "n_success": n_succ,
         "mean_finish_delta": round(float(delta.mean()), 3),   # 正=我方先完赛
-        # ---- 被反超风险
+        # ---- 被反超风险(条件概率口径)
         "loss_rate": round(float((~success).mean() * 100.0), 2),
-        "swap_rate": round(float(swapped.mean() * 100.0), 2),
+        "gained_rate": round(n_gained / n * 100.0, 2) if n else 0.0,
+        "relost_rate": round(relost_rate, 2),                 # 得而复失率(核心风险指标)
+        "swap_rate": round(float(swapped.mean() * 100.0), 2),  # 翻转频繁度(仅供参考)
     }
     lost_lead = (~success) & (overtaken > 0)
     n_lost_lead = int(lost_lead.sum())
@@ -418,10 +429,9 @@ def _branch_stats(success, overtake, overtaken, swapped, delta, remaining):
     else:
         stats["overtaken_mean"] = None
         stats["overtaken_median"] = None
-    # 风险等级: 曾领先却被反超的概率 + 位置翻转概率
-    risk_score = stats["overtaken_rate"] + 0.5 * stats["swap_rate"]
-    stats["risk_level"] = ("高" if risk_score >= 40 else
-                           "中" if risk_score >= 15 else "低")
+    # 风险等级: 按得而复失率(曾领先后又丢掉的条件概率)评定
+    stats["risk_level"] = ("高" if relost_rate >= 30 else
+                           "中" if relost_rate >= 10 else "低")
 
     if n_succ:
         ot = overtake[success].astype(np.int64)
@@ -449,7 +459,8 @@ def _merge_params(overrides):
     for k in ("pit_lane_transit", "pit_lane_transit_scvsc", "pit_lane_transit_red",
               "pit_normal_prob", "pit_normal_mean", "pit_normal_std",
               "pit_abnormal_mean", "pit_abnormal_std", "lap_noise_std",
-              "red_restart_gain", "red_restart_laps", "n_sim"):
+              "red_restart_gain", "red_restart_laps", "pit_reaction_laps",
+              "n_sim"):
         if overrides.get(k) is not None:
             p[k] = float(overrides[k])
     off = dict(DEFAULT_PARAMS["compound_offset"])
@@ -933,24 +944,29 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
     def profile(compound, age0, base, deg):
         return lap_profile(compound, age0, remaining, base, deg, offsets)
 
-    # 分支定义: (key, 标签, 说明, 我方是否进站, 对手是否进站, 我方起始胎龄, 对手起始胎龄)
+    # 反应延迟: 跟进方在对方进站后需 1~2 圈才完成响应(这正是 Undercut/Overcut
+    # 的机制来源 —— 先进站者在"重叠圈"用新胎对旧胎赚取时间)
+    react = max(0, int(p.get("pit_reaction_laps", 2) or 0))
+
+    # 分支定义: (key, 标签, 说明, 我方进站, 对手进站, 我方胎龄, 对手胎龄, 我方延迟, 对手延迟)
     if scenario == "undercut":
         branch_defs = [
             ("follow", "对手跟进进站",
-             "跟随者复制你的进站,双方都换上新胎,你以轮胎新度+领先优势守住位置",
-             True, True, 0, 0),
+             f"对手观察 {react} 圈后跟进进站(旧胎跑重叠圈),双方最终都换新胎;"
+             "你的收益 = 重叠圈里新胎对旧胎赚到的时间",
+             True, True, 0, 0, 0, react),
             ("stay", "对手不跟",
-             "对手留在赛道用旧胎,你出站后落在其身后,需在赛道上完成超越",
-             True, False, 0, rival_age),
+             "对手留在赛道用旧胎跑完剩余赛程,你出站后落后但新胎优势需在赛道上兑现",
+             True, False, 0, rival_age, 0, 0),
         ]
     elif scenario == "overcut":
         branch_defs = [
             ("stay", "你留在赛道",
-             "对手先进站换胎,你利用干净空气延长旧胎 stint,对手出站时已被你拉开",
-             False, True, my_age, 0),
+             "对手先进站换胎,你利用干净空气继续跑旧胎,吃对手的进站损失+新胎暖胎期",
+             False, True, my_age, 0, 0, 0),
             ("follow", "你跟进进站",
-             "你复制对手的进站,双方都换新胎,比拼进站执行与既有时差",
-             True, True, 0, 0),
+             f"你观察 {react} 圈后跟进进站(旧胎跑重叠圈),对手先换新胎已赚得重叠圈收益",
+             True, True, my_age, 0, react, 0),
         ]
     elif scenario == "red":
         # 红旗 = 比赛暂停 + 免费换胎(无进站损失) + 静态发车(新/软胎起步占优)
@@ -959,20 +975,20 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
             ("change", "红旗免费换胎",
              "比赛暂停期间免费换胎(零损失),静态发车用更新/更软的胎获取抓地增益;"
              "对手同样免费换胎,双方比拼换上套装的质量",
-             True, True, 0, 0),
+             True, True, 0, 0, 0, 0),
             ("stay", "红旗不换胎",
              "保留当前旧胎(为后段省下一套新胎),但对手免费换上新胎后,"
              "在静态发车的前几圈利用抓地优势直接得利",
-             False, True, my_age, 0),
+             False, True, my_age, 0, 0, 0),
         ]
     else:  # sc (SC/VSC 合并)
         branch_defs = [
             ("pit", "你进站(廉价窗口)",
              f"SC/VSC 限速下进站损失大幅降低(仅 {transit:.1f}s 通道),换新胎跑完剩余 {remaining} 圈",
-             True, False, 0, rival_age),
+             True, False, 0, rival_age, 0, 0),
             ("stay", "你不进站",
              "留在赛道保位置,但对手进站损失小,可能被翻掉",
-             False, False, my_age, rival_age),
+             False, False, my_age, rival_age, 0, 0),
         ]
 
     my_fit_deg = STORE.deg_params(my_driver, my_fit_compound)
@@ -984,15 +1000,29 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
         fresh = max(0.0, 1.0 - float(wear) / 20.0)
         return p["red_restart_gain"] * soft * fresh
 
+    def build_lt(pit, delay, cur_comp, cur_age, fit_comp, fit_wear, base, code):
+        """构造逐圈圈速: 不进站=旧胎到底; 延迟进站=先旧胎跑重叠圈再换新胎。"""
+        if not pit:
+            return profile(cur_comp, cur_age, base, STORE.deg_params(code, cur_comp))
+        if delay > 0 and delay < remaining:
+            pre = profile(cur_comp, cur_age, base,
+                          STORE.deg_params(code, cur_comp))[:delay]
+            post = profile(fit_comp, fit_wear, base,
+                           STORE.deg_params(code, fit_comp))
+            return np.concatenate([pre, post])[:remaining]
+        return profile(fit_comp, fit_wear, base,
+                       STORE.deg_params(code, fit_comp))
+
     branches = []
-    for key, label, desc, me_pit, riv_pit, my_a0, riv_a0 in branch_defs:
-        # 进站分支: 换上所选库存套装(含练习/排位磨损),起始胎龄 = 磨损圈数
-        lt_me = (profile(my_fit_compound, my_fit_wear, my_base, my_fit_deg)
-                 if me_pit else profile(my_compound, my_a0, my_base, my_deg))
-        lt_riv = (profile(rival_fit_compound, rival_fit_wear,
-                          rival_base, rival_fit_deg)
-                  if riv_pit else profile(rival_compound, riv_a0,
-                                          rival_base, rival_deg))
+    for key, label, desc, me_pit, riv_pit, my_a0, riv_a0, dly_me, dly_riv in branch_defs:
+        # 进站分支: 换上所选库存套装(含练习/排位磨损);延迟进站方先用旧胎跑重叠圈
+        lt_me = build_lt(me_pit, dly_me, my_compound,
+                         my_age if (me_pit and dly_me) else my_a0,
+                         my_fit_compound, my_fit_wear, my_base, my_driver)
+        lt_riv = build_lt(riv_pit, dly_riv, rival_compound,
+                          rival_age if (riv_pit and dly_riv) else riv_a0,
+                          rival_fit_compound, rival_fit_wear, rival_base,
+                          rival_driver)
         t0_me = (sample_pit_times(rng, n_sim, transit, p) if me_pit
                  else np.zeros(n_sim))
         t0_riv = (sample_pit_times(rng, n_sim, transit, p) + gap_s if riv_pit
@@ -1035,20 +1065,41 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
             **stats,
         })
 
+    # ---- 不动基线: 双方均不进站,用于剥离"车速差异"看"策略本身值多少"
+    lt_me0 = profile(my_compound, my_age, my_base, my_deg)
+    lt_riv0 = profile(rival_compound, rival_age, rival_base, rival_deg)
+    s0, _, _, _, d0 = _run_branch(
+        rng, n_sim, remaining, lt_me0, lt_riv0,
+        np.zeros(n_sim), np.full(n_sim, float(gap_s)), sigma_me, sigma_riv)
+    baseline_rate = round(float(s0.mean()) * 100.0, 2)
+    for b in branches:
+        b["baseline_rate"] = baseline_rate
+        b["strategy_gain_pp"] = round(b["success_rate"] - baseline_rate, 2)
+
+    # ---- 圈速差拆解(为何胜率高/低): 基准圈速差 + 换上套装期望差
+    pace_note = (
+        f"基准圈速: 我方 {my_base:.2f}s vs 对手 {rival_base:.2f}s"
+        f"(差 {rival_base - my_base:+.2f}s/圈);"
+        f"当前胎: {my_compound}@{my_age} vs {rival_compound}@{rival_age};"
+        f"换上: 我方 {my_fit_compound}(磨损{my_fit_wear}圈) vs "
+        f"对手 {rival_fit_compound}(磨损{rival_fit_wear}圈)")
+
     best = max(branches, key=lambda b: b["success_rate"])
     rec = {"branch": best["key"], "label": best["label"],
            "success_rate": best["success_rate"],
+           "baseline_rate": baseline_rate,
+           "strategy_gain_pp": best["strategy_gain_pp"],
            "risk_level": best["risk_level"],
-           "overtaken_rate": best["overtaken_rate"],
+           "relost_rate": best["relost_rate"],
            "swap_rate": best["swap_rate"]}
     risk_txt = (f"被反超风险{best['risk_level']}"
-                f"(曾领先却被反超 {best['overtaken_rate']:.1f}%,"
-                f"位置翻转 {best['swap_rate']:.1f}%)")
+                f"(曾领先后得而复失 {best['relost_rate']:.1f}%)")
+    gain_txt = f"(不动基线 {baseline_rate:.1f}%,策略增益 {best['strategy_gain_pp']:+.1f}pp)"
     if best["overtake_mean"] is not None and (best["overtake_median"] or 0) > 0:
-        rec["text"] = (f"推荐「{best['label']}」: 成功率 {best['success_rate']:.1f}%,"
+        rec["text"] = (f"推荐「{best['label']}」: 成功率 {best['success_rate']:.1f}%{gain_txt},"
                        f"成功时约 {best['overtake_mean']:.1f} 圈完成超越;{risk_txt}")
     else:
-        rec["text"] = (f"推荐「{best['label']}」: 成功率 {best['success_rate']:.1f}%,"
+        rec["text"] = (f"推荐「{best['label']}」: 成功率 {best['success_rate']:.1f}%{gain_txt},"
                        f"成功时可直接保持/获得位置;{risk_txt}")
 
     rule_note = None
@@ -1069,6 +1120,8 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
         "remaining": remaining,
         "gap_s": gap_s,
         "rule_note": rule_note,
+        "baseline": {"label": "双方均不进站(基线)", "success_rate": baseline_rate},
+        "pace_note": pace_note,
         "inputs": {
             "my": {"driver": my_driver,
                    "name": DRIVER_NAMES.get(my_driver, my_driver),
@@ -1102,6 +1155,7 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
             "noise_mode": noise_mode,
             "red_restart_gain": p["red_restart_gain"] if scenario == "red" else None,
             "red_restart_laps": int(p["red_restart_laps"]) if scenario == "red" else None,
+            "pit_reaction_laps": int(p["pit_reaction_laps"]),
         },
     }
 
@@ -1408,11 +1462,14 @@ def _result_digest(result):
                  f"对手 {rv.get('fit_compound')}(磨损{rv.get('fit_wear')}圈)")
     for b in result.get("branches", []):
         lines.append(
-            f"分支[{b.get('label')}]: 成功率 {b.get('success_rate')}%,"
+            f"分支[{b.get('label')}]: 成功率 {b.get('success_rate')}%"
+            f"(不动基线 {b.get('baseline_rate')}%,策略增益 {b.get('strategy_gain_pp'):+}pp),"
             f"被反超风险等级 {b.get('risk_level')}"
-            f"(曾领先被反超 {b.get('overtaken_rate')}%,位置翻转 {b.get('swap_rate')}%),"
+            f"(曾领先后得而复失 {b.get('relost_rate')}%),"
             f"期望完赛时间差 {b.get('mean_finish_delta')}s,"
             f"{b.get('pos_note') or ''}")
+    if result.get("pace_note"):
+        lines.append(f"圈速差拆解: {result['pace_note']}")
     pu = result.get("params_used", {}) or {}
     lines.append(f"圈速波动 σ: 我方 {pu.get('my_sigma')}s / 对手 {pu.get('rival_sigma')}s"
                  f"({pu.get('noise_mode')},实测标定近似正态)")
@@ -1467,16 +1524,18 @@ def _local_analysis(result):
                    else "留在赛道的既有时差与干净空气") + "。")
     for b in branches:
         rl = b.get("risk_level")
+        gain = b.get("strategy_gain_pp")
+        gain_txt = f",策略增益 {gain:+.1f}pp(不动基线 {b.get('baseline_rate')}%)" if gain is not None else ""
         if rl == "高":
-            out.append(f"⚠ 「{b['label']}」被反超风险高: 曾领先仍被反超的概率约 "
-                       f"{b.get('overtaken_rate')}%,位置翻转概率 {b.get('swap_rate')}%,"
-                       "落后方圈速波动足以抹平既有时差,不建议在无干净空气优势时采用。")
+            out.append(f"⚠ 「{b['label']}」被反超风险高: 曾领先后得而复失的概率约 "
+                       f"{b.get('relost_rate')}%,位置翻转频繁度 {b.get('swap_rate')}%{gain_txt},"
+                       "得手后需重点防守。")
         elif rl == "中":
-            out.append(f"「{b['label']}」被反超风险中等(被反超 {b.get('overtaken_rate')}%,"
-                       f"翻转 {b.get('swap_rate')}%),需关注后段轮胎衰减与对手进站窗口。")
+            out.append(f"「{b['label']}」被反超风险中等(得而复失 {b.get('relost_rate')}%"
+                       f",翻转 {b.get('swap_rate')}%){gain_txt},需关注后段轮胎衰减与对手进站窗口。")
         else:
-            out.append(f"「{b['label']}」被反超风险低(被反超 {b.get('overtaken_rate')}%,"
-                       f"翻转 {b.get('swap_rate')}%),位置基本稳固。")
+            out.append(f"「{b['label']}」被反超风险低(得而复失 {b.get('relost_rate')}%"
+                       f",翻转 {b.get('swap_rate')}%),位置基本稳固{gain_txt}。")
     pu = result.get("params_used", {}) or {}
     out.append(f"概率口径: 每圈圈速 ~ N(确定性圈速, σ²),我方 σ={pu.get('my_sigma')}s,"
                f"对手 σ={pu.get('rival_sigma')}s(实测标定),故成功率是连续概率而非硬判定。")
