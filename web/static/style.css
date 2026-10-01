@@ -841,3 +841,13 @@ input.fld[type="number"] { font-variant-numeric: tabular-nums; }
   color: var(--text, #e8ecf5);
 }
 
+/* ---------------- 对手换胎推断 ---------------- */
+.infer-card { border-left: 3px solid #3f8cff; }
+.infer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 4px;
+}
+

@@ -275,6 +275,7 @@ function renderPrerace(d) {
       <h3>正常策略 vs 强制两停</h3>
       <div class="chart-box">${svgHBar(compareItems)}</div>
       <p>${esc(deltaTxt)}(基于 DP 求解的期望总用时)</p>
+      ${cmp.note ? `<div class="rule-inline">&#9432; ${esc(cmp.note)}</div>` : ""}
     </div>
     <div class="card">
       <h3>累计用时曲线</h3>
@@ -467,8 +468,22 @@ function renderStackelberg(d) {
       <p>${esc(d.rule_note)}</p>
     </div>` : "";
 
+  const inf = d.rival_pit_inference || null;
+  const infBox = inf ? `
+    <div class="card infer-card">
+      <h3>对手换胎状态推断 <small style="color:var(--muted);font-weight:400">从对手胎龄 ${rv.age} 圈 / 比赛第 ${d.current_lap} 圈智能判断</small></h3>
+      <div class="infer-row">
+        <span class="risk-chip ${inf.status === "已换胎" ? "risk-mid" : inf.status === "未换胎" ? "risk-low" : "risk-high"}">${esc(inf.status)}</span>
+        <span class="risk-item">置信度 <b>${esc(inf.confidence)}</b></span>
+        ${inf.est_change_lap ? `<span class="risk-item">推测换胎圈 <b>第 ${inf.est_change_lap} 圈</b></span>` : ""}
+      </div>
+      <div class="branch-note" style="margin:6px 0">${esc(inf.reasoning)}</div>
+      <div class="branch-note"><b>战略解读:</b> ${esc(inf.strategy_read)}</div>
+    </div>` : "";
+
   $("#st-results").innerHTML = `
     <div class="card">${summary}</div>
+    ${infBox}
     <div class="branch-grid">${branchesHtml}</div>
     ${ruleBox}
     <div class="card">
@@ -489,8 +504,8 @@ function renderStackelberg(d) {
     <div class="card">
       <h3>本次模拟参数</h3>
       <div class="param-chips">${chips}</div>
-      <p style="margin-top:10px">模型说明: 圈速 = (基准圈速 + 配方偏移) × 100 / 性能保持率;
-        每圈圈速 ~ N(确定性圈速, σ²) —— σ 为 FastF1 摩纳哥正赛实测标定(近似正态),
+      <p style="margin-top:10px">模型说明: 圈速 = (基准圈速 + 配方偏移) ÷ 归一化性能保持率(暖胎+衰减形状,
+        配方速度差由偏移承担);每圈圈速 ~ N(确定性圈速, σ²) —— σ 为 FastF1 摩纳哥正赛实测标定(近似正态),
         成功率/被反超风险均为该概率口径下的频率估计;
         进站损失 = 通道行驶 + 换胎混合分布(85% N(2.5,0.3)s + 15% N(5.0,2.0)s);
         超越圈数 = 成功样本中"完成永久反超"距当前的圈数(0 = 无需追赶)。</p>

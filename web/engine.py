@@ -253,16 +253,34 @@ class DataStore:
         return out
 
     def deg_params(self, code, compound):
-        """车手级衰减参数,缺则回退全场汇总。"""
-        return self.deg.get(code, {}).get(compound) or self.pooled.get(
+        """车手级衰减参数,缺则回退全场汇总(含暖胎段物理合理性截断)。"""
+        raw = self.deg.get(code, {}).get(compound) or self.pooled.get(
             compound, self.pooled.get("C4", {"P0": 98.0, "t_peak": 0.0,
                                              "peak": 98.5, "deg": 0.03}))
+        return _sanitize_deg(raw)
 
     def base_time(self, code):
         return self.metrics.get(code, {}).get("base_time", 75.5)
 
 
 STORE = DataStore()
+
+
+def _sanitize_deg(params):
+    """暖胎段物理合理性截断。
+
+    拟合的 P0→peak 爬升段混入了发车/交通等混杂效应(个别拟合出现
+    t_peak 高达 22 圈、新胎比峰值慢 3~4 个点 → 新硬胎首圈竟慢 3 秒、
+    轮胎"越跑越快"20 余圈的非物理结果)。真实暖胎约为 1~3 圈、
+    落差 ≤1.2 个性能点,故引擎端统一截断:
+      t_peak ≤ 3 圈; P0 ≥ peak − 1.2。
+    衰减段斜率 deg 保持拟合值不变。
+    """
+    p = dict(params)
+    peak = float(p.get("peak", 98.5))
+    p["t_peak"] = min(max(float(p.get("t_peak", 0.0)), 0.0), 3.0)
+    p["P0"] = max(float(p.get("P0", peak)), peak - 1.2)
+    return p
 
 # ----------------------------------------------------------------- 圈速波动(实测标定)
 # 图表\14_圈速波动估计.csv(脚本\fit_lap_noise.py 产出):
@@ -314,10 +332,17 @@ def perf_pct(t, params):
 
 
 def lap_time(compound, tyre_age, base_time, params, offsets=None):
-    """单圈圈速(秒) = (基准圈速 + 配方偏移) × 100 / 性能保持率。"""
+    """单圈圈速(秒) = (基准圈速 + 配方偏移) ÷ 归一化性能保持率。
+
+    perf 曲线按各自峰值归一(p/peak,1.0=峰值状态)——消除跨配方的拟合
+    水平噪声(直接用绝对 perf 会与配方偏移双重计数,曾导致 C3 被算成最快
+    配方);归一后 perf 只刻画"暖胎 + 衰减"形状,配方速度差由 offset 承担。
+    """
     offsets = offsets if offsets is not None else DEFAULT_PARAMS["compound_offset"]
     p = perf_pct(tyre_age, params)
-    return (base_time + offsets.get(compound, 0.0)) * 100.0 / max(p, 50.0)
+    peak = max(float(params.get("peak", 98.5)), 50.0)
+    p_norm = max(p / peak, 0.5)
+    return (base_time + offsets.get(compound, 0.0)) / p_norm
 
 
 def lap_profile(compound, age0, n_laps, base_time, params, offsets=None):
@@ -564,6 +589,7 @@ def _best_wear_by_compound(tires):
 # ----------------------------------------------------------------- 库存约束 DP
 PRERACE_PIT_LOSS = 19.0     # 与 脚本\solve_dp_strategy.py 的 PIT_LOSS 一致
 MIN_STINT_LAPS = 5          # 每段最少圈数(同 DP 脚本)
+MAX_TYRE_AGE = 50           # 单套轮胎最大使用圈数(同 DP 脚本 MAX_TYRE_AGE)
 
 
 def _group_cost_tables(groups, driver, offsets):
@@ -579,55 +605,72 @@ def _group_cost_tables(groups, driver, offsets):
 
 
 def _solve_inventory(groups, tables, min_stops, max_stops=2):
-    """库存约束下枚举求解(1~2 停),返回 (总秒数, 计划[(组号, 圈数), ...])。
+    """库存约束下枚举求解,返回 (总秒数, 计划[(组号, 圈数), ...])。
 
-    - 每组最多使用次数 = 库存套数
-    - 每段 ≥ MIN_STINT_LAPS 圈
-    - 至少使用 2 种配方(FIA 规则)
+    - 每组最多使用次数 = 库存套数;每段 ≥ MIN_STINT_LAPS 圈
+    - 每次进站必须更换配方(与 脚本\solve_dp_strategy.py 的 DP 一致;
+      相邻同配方双 stint 的"胎龄重置"套利无实战意义,禁用)
+    - 每段结束胎龄 ≤ MAX_TYRE_AGE;至少使用 2 种配方(FIA 规则)
     """
     n = len(groups)
     comp_of = [g["compound"] for g in groups]
+    maxl = [max(MIN_STINT_LAPS, MAX_TYRE_AGE - int(g["wear"])) for g in groups]
     total = TOTAL_LAPS
     best = {k: (float("inf"), None) for k in range(min_stops, max_stops + 1)}
 
     def diverse(idxs):
         return len({comp_of[i] for i in idxs}) >= 2
 
-    # ---- 1 停: 两段 (i, j)
+    # ---- 1 停: 两段 (i, j),换配方
     if 1 in best:
         for i in range(n):
             for j in range(n):
+                if comp_of[i] == comp_of[j]:      # 进站必须换配方
+                    continue
                 if i == j and groups[i]["count"] < 2:
                     continue
                 if not diverse([i, j]):
                     continue
                 ci, cj = tables[i], tables[j]
-                for s in range(MIN_STINT_LAPS, total - MIN_STINT_LAPS + 1):
+                s_lo = MIN_STINT_LAPS
+                s_hi = min(maxl[i], total - MIN_STINT_LAPS)
+                for s in range(s_lo, s_hi + 1):
+                    if total - s > maxl[j]:
+                        continue
                     c = ci[s] + cj[total - s] + PRERACE_PIT_LOSS
                     if c < best[1][0]:
                         best[1] = (c, [(i, s), (j, total - s)])
 
-    # ---- 2 停: 三段 (i, j, k),先对 (i,j) 做最小加卷积得到前两段最优分割
+    # ---- 2 停: 三段 (i, j, k),相邻换配方;前两段用最小加卷积
     if 2 in best:
         m_lo, m_hi = 2 * MIN_STINT_LAPS, total - MIN_STINT_LAPS
         m_arr = np.arange(m_lo, m_hi + 1)
         for i in range(n):
             for j in range(n):
+                if comp_of[i] == comp_of[j]:      # 进站必须换配方
+                    continue
                 if i == j and groups[i]["count"] < 2:
                     continue
                 ci, cj = tables[i], tables[j]
                 b12 = np.full(total + 1, np.inf)
                 a12 = np.zeros(total + 1, dtype=np.int64)
-                for s in range(MIN_STINT_LAPS, total - 2 * MIN_STINT_LAPS + 1):
+                for s in range(MIN_STINT_LAPS, min(maxl[i], total - 2 * MIN_STINT_LAPS) + 1):
                     lo, hi = max(s + MIN_STINT_LAPS, m_lo), m_hi
+                    if lo > hi:
+                        continue
                     cand = ci[s] + cj[lo - s: hi - s + 1]
                     seg = b12[lo: hi + 1]
                     better = cand < seg
+                    # 第二段圈数不得超过该套装胎龄上限
+                    m_rng = np.arange(lo, hi + 1)
+                    better &= (m_rng - s) <= maxl[j]
                     if better.any():
                         idx = np.nonzero(better)[0]
                         b12[lo + idx] = cand[idx]
                         a12[lo + idx] = s
                 for k in range(n):
+                    if comp_of[j] == comp_of[k]:  # 进站必须换配方
+                        continue
                     cnt = {}
                     for g in (i, j, k):
                         cnt[g] = cnt.get(g, 0) + 1
@@ -636,7 +679,12 @@ def _solve_inventory(groups, tables, min_stops, max_stops=2):
                     if not diverse([i, j, k]):
                         continue
                     ck = tables[k]
-                    totals = b12[m_arr] + ck[total - m_arr] + 2 * PRERACE_PIT_LOSS
+                    third = total - m_arr
+                    ok = (third <= maxl[k]) & np.isfinite(b12[m_arr])
+                    if not ok.any():
+                        continue
+                    totals = np.where(ok, b12[m_arr] + ck[np.clip(third, 0, total)]
+                                      + 2 * PRERACE_PIT_LOSS, np.inf)
                     q = int(np.argmin(totals))
                     c = float(totals[q])
                     if c < best[2][0]:
@@ -722,6 +770,60 @@ def _auto_pick_set(tires, remaining, code, offsets, base):
                                  f"{' · 已用' + str(t['wear']) + '圈' if t['wear'] else ' · 新胎'}",
                     "etime_s": round(et, 1)}
     return best
+
+
+# ----------------------------------------------------------------- 对手换胎推断
+def infer_rival_pit_status(rival_age, current_lap):
+    """从对手当前胎龄推断其是否已进站换胎(启发式,供决策参考与 AI 分析)。
+
+    原理: 轮胎"已用圈数"= 该套装装上后的行驶圈数。对手若从未进站,
+    胎龄应≈比赛已进行圈数(发车胎);胎龄远小于赛程 → 该套装必是中途装上,
+    可反推其最近一次进站圈号 ≈ 当前圈 − 胎龄。
+    注意: 红旗/安全车下的免费换胎同样会重置胎龄,推断需结合旗种背景解读。
+    """
+    try:
+        age = int(rival_age)
+        lap = int(current_lap)
+    except (TypeError, ValueError):
+        return {"status": "不确定", "confidence": "低", "est_change_lap": None,
+                "reasoning": "胎龄/圈数输入无效", "strategy_read": ""}
+    est_change = lap - age                      # 该套装装上的圈号
+    if age >= lap - 1:
+        return {
+            "status": "未换胎", "confidence": "高", "est_change_lap": None,
+            "reasoning": f"对手胎龄 {age} 圈 ≈ 已进行 {lap} 圈,与发车胎一致,基本确定未进站",
+            "strategy_read": ("对手大概率执行一停长首段或尚未启动停站窗口;"
+                              "你先进站可逼其表态,但需防其反向延长做 Overcut。"),
+        }
+    if est_change <= 1:
+        return {
+            "status": "未换胎", "confidence": "中", "est_change_lap": None,
+            "reasoning": f"胎龄 {age} 圈与赛程 {lap} 圈基本同步,应为发车胎",
+            "strategy_read": "对手仍在首段,停站窗口未开启,可按既定节奏推进。",
+        }
+    if age <= 3 and lap >= 12:
+        return {
+            "status": "已换胎", "confidence": "高", "est_change_lap": max(est_change, 1),
+            "reasoning": (f"胎龄仅 {age} 圈而比赛已进行 {lap} 圈,"
+                          f"该套装约在第 {max(est_change, 1)} 圈装上 —— 刚进过站"),
+            "strategy_read": ("对手刚完成进站且换上较新轮胎,大概率目标一停到底;"
+                              "你若尚未进站,应尽快在本窗口跟进(Undercut 失效)或"
+                              "利用其新胎暖胎期争取出站窗口。"),
+        }
+    if est_change >= 5:
+        return {
+            "status": "已换胎", "confidence": "中", "est_change_lap": max(est_change, 1),
+            "reasoning": (f"胎龄 {age} 圈明显小于赛程 {lap} 圈,"
+                          f"估计第 {max(est_change, 1)} 圈前后进站换过胎"),
+            "strategy_read": ("对手已执行一次进站,剩余赛程预计一停到底;"
+                              "可对比双方换上套装的新旧与配方,评估 Undercut/Overcut 空间。"),
+        }
+    return {
+        "status": "不确定", "confidence": "低", "est_change_lap": max(est_change, 1),
+        "reasoning": (f"胎龄 {age} 圈与赛程 {lap} 圈差距不大(推测换胎圈约第 "
+                      f"{max(est_change, 1)} 圈),也可能是红旗/安全车下的免费换胎"),
+        "strategy_read": "建议结合比赛进程(是否出过 SC/红旗)人工复核后再决策。",
+    }
 
 
 # ----------------------------------------------------------------- 场景模拟入口
@@ -982,6 +1084,7 @@ def run_simulation(scenario, my_driver, my_compound, my_age,
         },
         "branches": branches,
         "recommendation": rec,
+        "rival_pit_inference": infer_rival_pit_status(rival_age, current_lap),
         "fit_mode": "auto" if auto_fit else "manual",
         "auto_fit": auto_info,
         "tire_choice": tire_choice_etime(COMPOUNDS, remaining, my_driver,
@@ -1037,9 +1140,13 @@ def _fmt_hms(t):
 
 
 def _solve_mode(driver, groups, tables, mode, offsets):
-    """按模式在库存约束下求解; 不可行返回 None。"""
-    min_stops = 1 if mode == "normal" else 2
-    total, plan = _solve_inventory(groups, tables, min_stops, max_stops=2)
+    """按模式在库存约束下求解; 不可行返回 None。
+
+    normal   = 恰好 1 停(2022–2024 常规规则实战常态,对比基准);
+    two_stop = 恰好 2 停(亦为摩纳哥 2025 新规"至少 3 套胎"的求解口径)。
+    """
+    stops = 1 if mode == "normal" else 2
+    total, plan = _solve_inventory(groups, tables, stops, max_stops=stops)
     if plan is None:
         return None
     stints = _plan_to_stints(plan, groups)
@@ -1130,6 +1237,13 @@ def get_prerace(driver, mode="normal", tires=None):
         "two_text": two_text, "two_s": two_s,
         "delta_s": (round(two_s - normal_s, 1)
                     if (normal_s is not None and two_s is not None) else None),
+        "note": ("纯时间口径下两停接近甚至略优,源于线性衰减模型的\"胎龄重置\"边际收益;"
+                 "但摩纳哥超车极难、赛道位置价值远超该边际差异,"
+                 "2022–2024 实战几乎全员一停,2025 起新规则强制至少 3 套胎。"
+                 if (delta := (round(two_s - normal_s, 1)
+                               if (normal_s is not None and two_s is not None) else None))
+                 is not None and delta <= 3 else
+                 "两停额外一次进站损失大于轮胎收益,验证了摩纳哥一停的常规性。"),
     }
 
     m = STORE.metrics.get(driver, {})
@@ -1256,14 +1370,27 @@ def _prerace_from_csv(driver, mode):
 
 # ----------------------------------------------------------------- AI 策略分析
 # 接入外部大模型 API(OpenAI 兼容 /chat/completions),可选:
-#   F1_AI_API_KEY  必填 —— API 密钥(未设置时自动降级为本地规则分析)
-#   F1_AI_BASE_URL 可选 —— 默认 https://api.openai.com/v1
-#   F1_AI_MODEL    可选 —— 默认 gpt-4o-mini
+#   配置来源(环境变量优先,其次 web/ai_config.local.json,后者不入库):
+#     F1_AI_API_KEY / api_key    必填 —— API 密钥(未配置时自动降级为本地规则分析)
+#     F1_AI_BASE_URL / base_url  可选 —— 默认 https://api.deepseek.com
+#     F1_AI_MODEL / model        可选 —— 默认 deepseek-flash(DeepSeek-V4.1-Flash)
 # 无论哪种来源,返回值都会明确标注,绝不冒充 AI 输出。
 def _ai_config():
     key = (os.environ.get("F1_AI_API_KEY") or "").strip()
-    base = (os.environ.get("F1_AI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
-    model = (os.environ.get("F1_AI_MODEL") or "gpt-4o-mini").strip()
+    base = (os.environ.get("F1_AI_BASE_URL") or "").strip()
+    model = (os.environ.get("F1_AI_MODEL") or "").strip()
+    local_path = os.path.join(WEB_DIR, "ai_config.local.json")
+    if os.path.exists(local_path):
+        try:
+            with open(local_path, "r", encoding="utf-8") as f:
+                local = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            local = {}
+        key = key or str(local.get("api_key") or "").strip()
+        base = base or str(local.get("base_url") or "").strip()
+        model = model or str(local.get("model") or "").strip()
+    base = base or "https://api.deepseek.com"
+    model = model or "deepseek-flash"
     return key, base, model
 
 
@@ -1289,6 +1416,10 @@ def _result_digest(result):
     pu = result.get("params_used", {}) or {}
     lines.append(f"圈速波动 σ: 我方 {pu.get('my_sigma')}s / 对手 {pu.get('rival_sigma')}s"
                  f"({pu.get('noise_mode')},实测标定近似正态)")
+    inf = result.get("rival_pit_inference") or {}
+    if inf:
+        lines.append(f"对手换胎推断: {inf.get('status')}(置信度{inf.get('confidence')});"
+                     f"{inf.get('reasoning', '')};战略解读: {inf.get('strategy_read', '')}")
     if result.get("rule_note"):
         lines.append(str(result["rule_note"]))
     return "\n".join(lines)
@@ -1349,6 +1480,10 @@ def _local_analysis(result):
     pu = result.get("params_used", {}) or {}
     out.append(f"概率口径: 每圈圈速 ~ N(确定性圈速, σ²),我方 σ={pu.get('my_sigma')}s,"
                f"对手 σ={pu.get('rival_sigma')}s(实测标定),故成功率是连续概率而非硬判定。")
+    inf = result.get("rival_pit_inference") or {}
+    if inf:
+        out.append(f"对手换胎推断({inf.get('status')},置信度{inf.get('confidence')}): "
+                   f"{inf.get('reasoning', '')}。{inf.get('strategy_read', '')}")
     if result.get("rule_note"):
         out.append("规则提示: " + str(result["rule_note"]))
     return "\n".join(out)
@@ -1453,7 +1588,7 @@ def get_meta():
         "tire_sources": TIRE_SOURCES,
         "tire_rules": TIRE_RULES,
         "race_sets_max": RACE_SETS_MAX,
-        "ai_enabled": bool((os.environ.get("F1_AI_API_KEY") or "").strip()),
+        "ai_enabled": bool(_ai_config()[0]),
         "noise": {
             "global_sigma": round(_NOISE_TRIM, 3),
             "mode": "auto",
