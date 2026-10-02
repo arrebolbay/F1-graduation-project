@@ -262,6 +262,22 @@ def main():
     if args.open:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
 
+    # 启动即自检 AI/API 可用性(后台线程,不阻塞启动),
+    # 页面 AI 策略分析区据此常驻显示"联网AI分析可用 / 不可用"
+    def _ai_startup_check():
+        try:
+            st = engine.refresh_ai_status()
+            flag = ("✓ 联网AI分析可用" if st.get("ok")
+                    else "✗ 联网AI分析不可用,将使用本地规则分析")
+            print(f" [AI 自检] {flag} (model={st.get('model')}, "
+                  f"延迟={st.get('latency_ms')}ms)")
+            if st.get("error"):
+                print(f" [AI 自检] 原因: {st['error']}")
+        except Exception as e:  # noqa: BLE001
+            print(f" [AI 自检] 异常: {e}")
+
+    threading.Thread(target=_ai_startup_check, daemon=True).start()
+
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

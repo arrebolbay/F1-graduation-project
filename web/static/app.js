@@ -365,9 +365,19 @@ async function runStackelberg() {
   }
 }
 
+function aiBadgeHtml(aist) {
+  if (aist && aist.checked) {
+    return aist.ok
+      ? `<span class="risk-chip risk-low" id="ai-avail-badge">联网AI分析可用${aist.model ? " · " + esc(aist.model) : ""}</span>`
+      : `<span class="risk-chip risk-high" id="ai-avail-badge">联网AI分析不可用 · 本地规则分析</span>`;
+  }
+  return `<span class="risk-chip risk-mid" id="ai-avail-badge">AI 可用性检测中…</span>`;
+}
+
 function renderStackelberg(d) {
   const my = d.inputs.my, rv = d.inputs.rival;
   const bestKey = d.recommendation.branch;
+  const dec = d.decision || null;
 
   const summary = `
     <div class="hero-top">
@@ -421,7 +431,7 @@ function renderStackelberg(d) {
       <div class="branch-card ${isBest ? "best" : ""}">
         <div class="branch-head">
           <span class="branch-label">${esc(b.label)}</span>
-          ${isBest ? '<span class="branch-tag">推荐分支</span>' : ""}
+          ${isBest ? `<span class="branch-tag">${dec && dec.kind === "exogenous" ? "期望更高情景" : "更优动作"}</span>` : ""}
         </div>
         <div class="branch-desc">${esc(b.desc)}</div>
         <div class="rate-row">
@@ -478,16 +488,32 @@ function renderStackelberg(d) {
     </div>` : "";
 
   const inf = d.rival_pit_inference || null;
-  const infBox = inf ? `
-    <div class="card infer-card">
-      <h3>对手换胎状态推断 <small style="color:var(--muted);font-weight:400">从对手胎龄 ${rv.age} 圈 / 比赛第 ${d.current_lap} 圈智能判断</small></h3>
+  const verdictClass = (dec && /不值得|不动/.test(dec.verdict)) ? "risk-high"
+    : (dec && /临界/.test(dec.verdict)) ? "risk-mid" : "risk-low";
+  const decBox = dec ? `
+    <div class="card">
+      <h3>决策评估 <small style="color:var(--muted);font-weight:400">我方决策 = 是否执行该策略/选哪个动作;对手跟不跟是外生不确定事件,只能按概率加权</small></h3>
+      <div class="branch-desc">${esc(dec.question)}</div>
       <div class="infer-row">
-        <span class="risk-chip ${inf.status === "已换胎" ? "risk-mid" : inf.status === "未换胎" ? "risk-low" : "risk-high"}">${esc(inf.status)}</span>
-        <span class="risk-item">置信度 <b>${esc(inf.confidence)}</b></span>
-        ${inf.est_change_lap ? `<span class="risk-item">推测换胎圈 <b>第 ${inf.est_change_lap} 圈</b></span>` : ""}
+        <span class="risk-chip ${verdictClass}">${esc(dec.verdict)}</span>
+        <span class="risk-item">不动基线 <b>${(dec.hold?.success_rate ?? 0).toFixed(1)}%</b></span>
+        ${dec.follow_prob != null ? `<span class="risk-item">对手跟进概率(外生) <b>${(dec.follow_prob * 100).toFixed(0)}%</b></span>` : ""}
+        ${dec.breakeven_follow != null ? `<span class="risk-item">临界跟进概率 <b>${(dec.breakeven_follow * 100).toFixed(0)}%</b></span>` : ""}
       </div>
-      <div class="branch-note" style="margin:6px 0">${esc(inf.reasoning)}</div>
-      <div class="branch-note"><b>战略解读:</b> ${esc(inf.strategy_read)}</div>
+      ${(dec.options || []).map((o) => `
+        <div class="rob-row">
+          <span class="rob-name">${esc(o.label)}</span>
+          <div class="rob-bar"><i style="width:${Math.max(o.success_rate, 0.5)}%"></i></div>
+          <span class="rob-val">${o.success_rate.toFixed(1)}% (${(o.strategy_gain_pp ?? 0) > 0 ? "+" : ""}${(o.strategy_gain_pp ?? 0).toFixed(1)}pp)</span>
+        </div>`).join("")}
+      <div class="rob-row">
+        <span class="rob-name">${esc(dec.hold?.label || "不动")}</span>
+        <div class="rob-bar"><i style="width:${Math.max(dec.hold?.success_rate ?? 0, 0.5)}%"></i></div>
+        <span class="rob-val">${(dec.hold?.success_rate ?? 0).toFixed(1)}%</span>
+      </div>
+      <div class="branch-note" style="margin-top:8px"><b>决策依据:</b> ${esc(dec.verdict_text)}</div>
+      ${dec.follow_prob != null ? `<div class="branch-note"><b>对手行为评估(外生不确定事件,非我方决策):</b> 跟进概率约 ${(dec.follow_prob * 100).toFixed(0)}% —— ${esc(dec.follow_basis || "")}</div>` : ""}
+      ${inf ? `<div class="branch-note"><b>对手轮胎证据(用于判断其跟进概率):</b> ${esc(inf.status)}(置信度${esc(inf.confidence)}) —— ${esc(inf.reasoning || "")}</div>` : ""}
     </div>` : "";
 
   const rob = d.robustness;
@@ -513,7 +539,13 @@ function renderStackelberg(d) {
 
   $("#st-results").innerHTML = `
     <div class="card">${summary}</div>
-    ${infBox}
+    ${decBox}
+    <div class="branch-note" style="margin:10px 2px 6px">
+      <b>${dec && dec.kind === "exogenous" ? "情景模拟" : "动作对比"}:</b>
+      ${dec && dec.kind === "exogenous"
+        ? "对手跟不跟是外生不确定事件 —— 以下按条件句呈现各情景,并非我方可选动作;我方决策已在上方「决策评估」中给出。"
+        : "以下均为我方可执行的动作,直接对比选择。"}
+    </div>
     <div class="branch-grid">${branchesHtml}</div>
     ${robBox}
     ${ruleBox}
@@ -522,15 +554,16 @@ function renderStackelberg(d) {
       <div class="chart-box">${svgHBar(tireItems, { padL: 190 })}</div>
     </div>
     <div class="card">
-      <h3>AI 策略分析 <small style="color:var(--muted);font-weight:400">综合成功率与被反超风险的策略解读</small></h3>
+      <h3>AI 策略分析 ${aiBadgeHtml(d.ai_status || (META && META.ai_status))}
+        <small style="color:var(--muted);font-weight:400">围绕「是否值得执行」的策略解读(对手反应以条件句呈现)</small></h3>
       <div class="btn-row" style="margin-bottom:8px">
         <button type="button" class="btn-ghost" id="ai-btn">生成 AI 策略分析</button>
         <button type="button" class="btn-ghost" id="ai-test-btn">测试 API 连接</button>
       </div>
       <div id="ai-panel" class="ai-panel">
-        <p class="fld-hint">点击按钮生成分析。${META && META.ai_enabled
-          ? "已配置大模型 API,将由 AI 生成。"
-          : "未配置 F1_AI_API_KEY,将使用本地规则分析(配置后自动切换为大模型)。"}</p>
+        <p class="fld-hint">点击按钮生成分析。${(d.ai_status && d.ai_status.ok) || (META && META.ai_status && META.ai_status.ok)
+          ? "联网AI分析可用,将由大模型生成。"
+          : "联网AI不可用,将使用本地规则分析(修复后点「测试 API 连接」刷新状态)。"}</p>
       </div>
     </div>
     <div class="card">
@@ -539,7 +572,10 @@ function renderStackelberg(d) {
       <p style="margin-top:10px">模型说明: 圈速 = (基准圈速 + 配方偏移) ÷ 归一化性能保持率(暖胎+衰减形状,
         配方速度差由偏移承担);每圈圈速 ~ N(确定性圈速, σ²) —— σ 为 FastF1 摩纳哥正赛实测标定(近似正态),
         成功率/被反超风险均为该概率口径下的频率估计;
-        进站损失 = 通道行驶 + 换胎混合分布(85% N(2.5,0.3)s + 15% N(5.0,2.0)s);
+        进站损失 = 通道行驶 + 换胎混合分布(85% N(2.5,0.3)s + 15% N(5.0,2.0)s),落在实际进站圈上;
+        位置模型: 名次交换分两条通道 —— 进站窗口交换自动完成,赛道超越需逐圈低概率尝试
+        (摩纳哥超车极难,基础 ${(d.params_used?.monaco_pass_base ?? 0.035)} /圈,每 +1s/圈 速度优势 +${d.params_used?.monaco_pass_slope ?? 0.12});
+        决策语义: 我方决策 = 是否执行/选动作;对手跟不跟 = 外生不确定事件,按跟进概率加权;
         超越圈数 = 成功样本中"完成永久反超"距当前的圈数(0 = 无需追赶)。</p>
     </div>`;
 
@@ -558,6 +594,8 @@ async function runAiTest() {
   try {
     const res = await fetch("/api/ai/test");
     const d = await res.json();
+    const badge = $("#ai-avail-badge");
+    if (badge) badge.outerHTML = aiBadgeHtml({ checked: true, ok: d.ok, model: d.model });
     panel.innerHTML = d.ok
       ? `<div class="ai-src ai-llm">连接成功</div>
          <pre class="ai-text">模型 ${esc(d.model)} · 延迟 ${d.latency_ms}ms · 模型回复: ${esc(d.reply || "OK")}</pre>
