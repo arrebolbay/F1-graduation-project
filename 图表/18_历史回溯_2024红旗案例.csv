@@ -1,0 +1,23 @@
+﻿车手,红旗重启处换胎,全场stint数,stint结构
+ALB,是,2,MEDIUM(1-1) | HARD(2-77)
+ALO,是,2,HARD(1-1) | MEDIUM(2-76)
+BOT,是,3,HARD(1-1) | MEDIUM(2-15) | HARD(16-76)
+GAS,是,2,HARD(1-1) | MEDIUM(2-77)
+HAM,是,3,HARD(1-1) | MEDIUM(2-51) | HARD(52-78)
+HUL,否,1,MEDIUM(1-1)
+LEC,是,2,MEDIUM(1-1) | HARD(2-78)
+MAG,否,1,HARD(1-1)
+NOR,是,2,MEDIUM(1-1) | HARD(2-78)
+OCO,否,1,HARD(1-1)
+PER,否,1,HARD(1-1)
+PIA,是,2,MEDIUM(1-1) | HARD(2-78)
+RIC,是,2,MEDIUM(1-1) | HARD(2-76)
+RUS,是,2,HARD(1-1) | MEDIUM(2-78)
+SAI,是,2,MEDIUM(1-1) | HARD(2-78)
+SAR,是,3,HARD(1-1) | HARD(2-57) | MEDIUM(58-76)
+STR,是,4,HARD(1-1) | MEDIUM(2-42) | HARD(43-48) | SOFT(49-76)
+TSU,是,2,MEDIUM(1-1) | HARD(2-77)
+VER,是,3,HARD(1-1) | MEDIUM(2-52) | HARD(53-78)
+ZHO,是,3,MEDIUM(1-1) | HARD(2-70) | SOFT(71-76)
+—模型—,建议:红旗免费换胎,—,红旗免费换胎=99.96% | 红旗不换胎=0.04%
+—对照—,实际换胎 16/20,—,算法建议与多数车队一致: 是
