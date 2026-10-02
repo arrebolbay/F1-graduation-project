@@ -123,6 +123,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(result)
             elif path == "/api/tables":
                 self._json(engine.get_tables())
+            elif path == "/api/ai/test":
+                self._json(engine.ai_self_test())
             elif path == "/api/history":
                 q = parse_qs(url.query)
                 limit = int((q.get("limit") or ["200"])[0])

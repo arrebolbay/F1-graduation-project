@@ -525,6 +525,7 @@ function renderStackelberg(d) {
       <h3>AI 策略分析 <small style="color:var(--muted);font-weight:400">综合成功率与被反超风险的策略解读</small></h3>
       <div class="btn-row" style="margin-bottom:8px">
         <button type="button" class="btn-ghost" id="ai-btn">生成 AI 策略分析</button>
+        <button type="button" class="btn-ghost" id="ai-test-btn">测试 API 连接</button>
       </div>
       <div id="ai-panel" class="ai-panel">
         <p class="fld-hint">点击按钮生成分析。${META && META.ai_enabled
@@ -545,6 +546,33 @@ function renderStackelberg(d) {
   LAST_SIM = d;
   const aiBtn = $("#ai-btn");
   if (aiBtn) aiBtn.addEventListener("click", runAiAnalysis);
+  const aiTestBtn = $("#ai-test-btn");
+  if (aiTestBtn) aiTestBtn.addEventListener("click", runAiTest);
+}
+
+async function runAiTest() {
+  const panel = $("#ai-panel"), btn = $("#ai-test-btn");
+  if (!panel) return;
+  if (btn) btn.disabled = true;
+  panel.innerHTML = `<p class="fld-hint">API 连通性测试中…</p>`;
+  try {
+    const res = await fetch("/api/ai/test");
+    const d = await res.json();
+    panel.innerHTML = d.ok
+      ? `<div class="ai-src ai-llm">连接成功</div>
+         <pre class="ai-text">模型 ${esc(d.model)} · 延迟 ${d.latency_ms}ms · 模型回复: ${esc(d.reply || "OK")}</pre>
+         <div class="fld-hint">接口 ${esc(d.base_url || "")} —— 可点击「生成 AI 策略分析」</div>`
+      : `<div class="ai-src ai-local">连接失败</div>
+         <pre class="ai-text">${esc(d.error || "未知错误")}</pre>
+         <div class="fld-hint">接口 ${esc(d.base_url || "")} · 模型 ${esc(d.model || "")} · 延迟 ${d.latency_ms}ms。
+           排查: ①web/ai_config.local.json 的 api_key 是否正确;②网络能否访问 api.deepseek.com;③密钥额度是否用尽</div>`;
+  } catch (e) {
+    panel.innerHTML = `<div class="ai-src ai-local">测试失败</div>
+      <pre class="ai-text">${esc(e.message)}</pre>
+      <div class="fld-hint">后端服务不可达 —— 请先启动 web\\server.py</div>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function runAiAnalysis() {

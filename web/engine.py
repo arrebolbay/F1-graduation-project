@@ -1571,7 +1571,9 @@ def _result_digest(result):
     return "\n".join(lines)
 
 
-def _llm_analyze(base, model, key, digest):
+def _llm_analyze(base, model, key, digest, timeout=120):
+    """调用 OpenAI 兼容接口生成分析;超时 120s(推理型模型较长)、失败重试一次、
+    content 为空时回退 reasoning_content。"""
     import urllib.request
     prompt = (
         "你是一位资深 F1 策略工程师,正在摩纳哥大奖赛的维修墙工作。"
@@ -1584,13 +1586,27 @@ def _llm_analyze(base, model, key, digest):
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.4,
     }).encode("utf-8")
-    req = urllib.request.Request(
-        base + "/chat/completions", data=payload,
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {key}"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"].strip()
+    last_err = None
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(
+                base.rstrip("/") + "/chat/completions", data=payload,
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {key}"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            msg = (data.get("choices") or [{}])[0].get("message") or {}
+            text = (msg.get("content") or "").strip()
+            if not text:      # 推理型模型可能只回 reasoning_content
+                text = (msg.get("reasoning_content") or "").strip()
+            if not text:
+                raise RuntimeError("模型返回空内容")
+            return text
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt == 0:
+                continue
+    raise RuntimeError(str(last_err))
 
 
 def _local_analysis(result):
@@ -1655,6 +1671,26 @@ def ai_analysis(result):
                 "配置后自动切换为大模型分析")
     return {"source": "local", "model": None, "enabled": False,
             "text": _local_analysis(result), "note": note}
+
+
+def ai_self_test():
+    """AI 接口连通性自检(最小请求),返回结构化诊断信息。"""
+    key, base, model = _ai_config()
+    info = {"ok": False, "enabled": bool(key), "model": model,
+            "base_url": base, "latency_ms": None, "reply": None,
+            "error": None}
+    if not key:
+        info["error"] = ("未配置密钥: 请在 web/ai_config.local.json 填入 api_key,"
+                         "或设置环境变量 F1_AI_API_KEY")
+        return info
+    t0 = time.time()
+    try:
+        text = _llm_analyze(base, model, key, "连通性测试,请仅回复:OK", timeout=45)
+        info.update(ok=True, reply=text[:50],
+                    latency_ms=int((time.time() - t0) * 1000))
+    except Exception as e:  # noqa: BLE001
+        info.update(error=str(e), latency_ms=int((time.time() - t0) * 1000))
+    return info
 
 
 # ----------------------------------------------------------------- 历史记录
