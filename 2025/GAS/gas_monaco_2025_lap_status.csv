@@ -1,0 +1,9 @@
+﻿LapNumber,Driver,TrackStatus,Stint,TyreLife,FreshTyre,Compound,PitInTime,PitOutTime,LapTime_s
+1.0,GAS,126,1.0,7.0,False,MEDIUM,0 days 00:57:37.624000,,112.223
+2.0,GAS,6,2.0,1.0,True,MEDIUM,,0 days 00:58:01.973000,108.974
+3.0,GAS,6,2.0,2.0,True,MEDIUM,,,108.723
+4.0,GAS,671,2.0,3.0,True,MEDIUM,,,91.509
+5.0,GAS,1,2.0,4.0,True,MEDIUM,,,78.864
+6.0,GAS,1,2.0,5.0,True,MEDIUM,,,78.054
+7.0,GAS,1,2.0,6.0,True,MEDIUM,,,79.262
+8.0,GAS,12,2.0,7.0,True,MEDIUM,0 days 01:08:39.977000,,

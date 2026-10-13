@@ -9,7 +9,12 @@ r"""
     图表/14_圈速波动估计.csv   汇总/分年/分车手/分配方 σ 与正态性检验
 结论供 web\engine.py 的 lap_noise_std 默认值使用。
 
-过滤: 绿旗圈(TrackStatus=1)、非进站圈、剔除第 1 圈(发车圈)、有效 LapTime。
+过滤: 统一走 laps_cleaning 的**拟合链路**口径 —— 全绿圈(TrackStatus=1)、
+非进站圈、非发车圈(LapNumber=1)、非重启圈(SC/红旗后首圈)、非离群圈,
+并再剔除出场圈(进站出口限速的结构性偏差会放大 σ)。
+这是``图表\\14_圈速波动估计.csv`` 的唯一口径来源,与
+``fit_tire_degradation.py`` 完全一致(旧实现用 ``startswith("1")`` 会把
+``TrackStatus="14"`` 的 SC 重启圈误当绿旗圈)。
 """
 
 import os
@@ -26,6 +31,11 @@ CACHE_DIR = os.path.join(PROJECT_DIR, "缓存", "f1_cache")
 CHART_DIR = os.path.join(PROJECT_DIR, "图表")
 YEARS = [2022, 2023, 2024, 2025]
 EVENT = "Monaco"
+
+sys.path.insert(0, SCRIPT_DIR)
+import laps_cleaning  # noqa: E402  统一清洗口径(单一事实来源)
+
+FUEL_EFFECT = laps_cleaning.FUEL_EFFECT_SEC_PER_LAP
 
 # 2025 摩纳哥 C6/C5/C4 → 保留绝对 ID;2022-2024 SOFT/MEDIUM/HARD → C5/C4/C3
 COMPOUND_MAP = {
@@ -45,24 +55,25 @@ def collect_residuals():
         laps = session.laps
         for drv, dl in laps.groupby("Driver"):
             df = pd.DataFrame({
+                "Year": year,
+                "Driver": drv,
                 "LapNumber": dl["LapNumber"].values,
                 "LapTime_s": dl["LapTime"].dt.total_seconds().values,
+                "LapTimeS": dl["LapTime"].dt.total_seconds().values,
                 "Compound": dl["Compound"].values,
                 "Stint": dl["Stint"].values,
-                "PitIn": dl["PitInTime"].notna().values,
-                "PitOut": dl["PitOutTime"].notna().values,
+                "PitInTime": dl["PitInTime"].values,
+                "PitOutTime": dl["PitOutTime"].values,
                 "TrackStatus": dl["TrackStatus"].astype(str).values,
             })
-            # 过滤: 有效圈速 / 非进站圈 / 绿旗 / 非第 1 圈
-            ok = (
-                df["LapTime_s"].notna()
-                & ~df["PitIn"] & ~df["PitOut"]
-                & df["TrackStatus"].str.startswith("1")
-                & (df["LapNumber"] > 1)
-            )
-            df = df[ok].copy()
+            df = df[df["LapTime_s"].notna()].copy()
             df["Comp"] = df["Compound"].map(COMPOUND_MAP)
-            df = df.dropna(subset=["Comp"])
+            df = df.dropna(subset=["Comp"])      # 修正:原实现漏了赋值,导致 UNKNOWN 配方混入
+            # 统一清洗口径(发车/进站/中性化/重启/离群),再取拟合链路并剔除出场圈
+            df = laps_cleaning.add_lap_flags(df, fuel_effect=FUEL_EFFECT)
+            df = laps_cleaning.fit_ready(df, drop_pit_out=True)
+            if df.empty:
+                continue
             # 每个 (stint) 线性去趋势
             for stint, g in df.groupby("Stint"):
                 g = g.sort_values("LapNumber")
@@ -134,7 +145,7 @@ def main():
     summary.to_csv(out_path, index=False, encoding="utf-8-sig")
     raw_path = os.path.join(CHART_DIR, "14b_圈速残差明细.csv")
     df.to_csv(raw_path, index=False, encoding="utf-8-sig")
-    print(summary[summary["范围"] == "汇总"].to_string(index=False))
+    print(summary[summary["范围"].str.startswith("汇总")].to_string(index=False))
     print(f"\n已保存: {out_path}")
     print(f"已保存: {raw_path}")
 

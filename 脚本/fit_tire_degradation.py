@@ -12,6 +12,7 @@ r"""
 """
 
 import os
+import sys
 import warnings
 import numpy as np
 import pandas as pd
@@ -30,6 +31,9 @@ CACHE_DIR = os.path.join(PROJECT_DIR, "缓存", "f1_cache")
 CHART_DIR = os.path.join(PROJECT_DIR, "图表")
 os.makedirs(CHART_DIR, exist_ok=True)
 
+sys.path.insert(0, SCRIPT_DIR)
+import laps_cleaning  # noqa: E402  统一清洗口径(单一事实来源)
+
 YEARS = [2022, 2023, 2024, 2025]
 EVENT, SESSION_TYPE = "Monaco", "R"
 
@@ -43,8 +47,8 @@ EXCLUDE_COMPOUNDS = {"C6"}
 VALID_COMPOUNDS = ["C5", "C4", "C3"]
 COMPOUND_COLORS = {"C5": "#e10600", "C4": "#ffd700", "C3": "#b0b0b0"}
 
-FUEL_EFFECT = 0.06               # 燃油修正:秒/圈(可调)
-OUTLIER_MAD_K = 3.0              # 异常圈剔除阈值
+FUEL_EFFECT = laps_cleaning.FUEL_EFFECT_SEC_PER_LAP   # 燃油修正:秒/圈(统一口径)
+OUTLIER_MAD_K = laps_cleaning.DEFAULT_MAD_K           # 异常圈剔除阈值(统一口径)
 
 for _n in ("Microsoft YaHei", "SimHei", "SimSun"):
     try:
@@ -89,7 +93,14 @@ def load_all_laps():
 
 
 # ----------------------------------------------------------------- 数据清洗
-def build_clean_table(raw: pd.DataFrame) -> pd.DataFrame:
+def build_clean_table(raw: pd.DataFrame):
+    """清洗 + 打统一标记。返回 ``(df_fit, df_all)``。
+
+    * ``df_fit`` —— **拟合链路**:``include_in_fit`` 子集,用于衰减拟合;
+    * ``df_all`` —— **模拟链路**:全量(含异常圈),``TyreAge`` 连续累计。
+
+    异常圈判定统一走 :mod:`laps_cleaning`,本函数不再自带一套规则。
+    """
     df = raw.copy()
     df = df.dropna(subset=["LapTime", "Compound", "LapNumber", "Driver"])
     df["LapTimeS"] = df["LapTime"].dt.total_seconds()
@@ -119,8 +130,7 @@ def build_clean_table(raw: pd.DataFrame) -> pd.DataFrame:
         if n_used:
             print(f"  旧胎识别: 首段 {n_used} 圈使用旧胎(偏移量由基准曲线反推)")
 
-    # 标记 include_in_fit:发车圈/进站圈 不参与拟合,但胎龄照常累计
-    df["include_in_fit"] = True
+    # 注意:include_in_fit 由 laps_cleaning.add_lap_flags 统一判定(见下方)
 
     # ① 每段第一圈 = 出场圈 → 估计并扣除进站出口惩罚后参与拟合(暖胎数据!)
     first_lap = df.groupby(["Year", "Driver", "Stint"])["LapNumber"].transform("min") == df["LapNumber"]
@@ -138,74 +148,27 @@ def build_clean_table(raw: pd.DataFrame) -> pd.DataFrame:
     # 修正出场圈圈速(减去进站出口限速惩罚,保留冷胎效应)
     df.loc[df["is_pit_out"], "LapTimeS"] -= pit_exit_penalty
 
-    # ② 每段最后一圈(非末段)= 进站圈(含进站损失时间,圈速人为偏长)
-    df["_last_stint"] = df.groupby(["Year", "Driver"])["Stint"].transform("max") == df["Stint"]
-    df["_last_lap"] = df.groupby(["Year", "Driver", "Stint"])["LapNumber"].transform("max") == df["LapNumber"]
-    pit_in = df["_last_lap"] & ~df["_last_stint"]
-    df.loc[pit_in, "include_in_fit"] = False
-
-    # ③ 第1圈 = 发车圈(发车程序导致圈速偏长)
-    df.loc[df["LapNumber"] == 1, "include_in_fit"] = False
-
-    # ④ 红旗/安全车重启后的第一圈(重启发车程序导致圈速偏长)
-    if "TrackStatus" in df.columns:
-        def _flag_restart(g):
-            g = g.sort_values("LapNumber").copy()
-            prev_ts = g["TrackStatus"].astype(str).shift(1)
-            curr_ts = g["TrackStatus"].astype(str)
-            # 前一圈有红旗(5)或SC(4),当前圈绿旗(1) → 重启圈
-            is_restart = (
-                prev_ts.str.contains("[45]", regex=True, na=False) &
-                curr_ts.str.contains("1", na=False)
-            )
-            g.loc[is_restart, "include_in_fit"] = False
-            return g
-
-        df = df.groupby(["Year", "Driver"], group_keys=False).apply(_flag_restart)
-
-    n_excl = int((~df["include_in_fit"]).sum())
-    print(f"  标记排除圈: {n_excl} 行(发车/进站/重启,出场圈已修正后参与拟合)")
-
-    # 诊断:2024年 Lap2 数据检查
-    diag = df[(df["Year"] == 2024) & (df["LapNumber"] == 2)]
-    if not diag.empty:
-        print(f"  [诊断] 2024 Lap2: {len(diag)} 行, "
-              f"排除 {int((~diag['include_in_fit']).sum())} 行")
-        for drv in ["LEC", "VER", "HAM"]:
-            row = diag[diag["Driver"] == drv]
-            if not row.empty:
-                r = row.iloc[0]
-                ft = r.get("FreshTyre", "N/A")
-                print(f"    {drv}: LapTime={r['LapTimeS']:.1f}s  "
-                      f"TyreAge={r['TyreAge']:.0f}  {r['AbsCompound']}  "
-                      f"FreshTyre={ft}  拟合={r['include_in_fit']}")
-
-    # ④ 异常圈过滤(SC/VSC/交通,MAD)—— 也标记为不参与拟合
-    def _flag_outliers(g):
-        med = g["LapTimeS"].median()
-        mad = (g["LapTimeS"] - med).abs().median()
-        if mad < 1e-6:
-            mad = 0.5
-        outlier = (g["LapTimeS"] - med).abs() > OUTLIER_MAD_K * 1.4826 * mad
-        g = g.copy()
-        g.loc[outlier, "include_in_fit"] = False
-        return g
-
-    df = df.groupby(["Year", "Driver"], group_keys=False).apply(_flag_outliers)
-    n_excl2 = int((~df["include_in_fit"]).sum())
-    print(f"  加上异常圈后排除: {n_excl2} 行")
-    print(f"  参与拟合的有效行: {int(df['include_in_fit'].sum())} 行")
-
-    # 燃油修正
+    # ── 燃油修正(统一口径常量 laps_cleaning.FUEL_EFFECT_SEC_PER_LAP) ──
     df["CorrectedLapTime"] = df["LapTimeS"] + FUEL_EFFECT * (df["LapNumber"] - 1)
+
+    # ── 统一异常圈判定(单一事实来源:laps_cleaning.add_lap_flags) ──
+    #    发车圈 / 进站圈 / 中性化圈(黄·SC·红旗·VSC) / 重启圈 / 离群圈
+    #    旧实现的三处不一致(只认 [45]、startswith("1") 漏判 VSC、
+    #    对未扣燃油的原始圈速取 MAD)已全部作废。
+    df = laps_cleaning.add_lap_flags(df, mad_k=OUTLIER_MAD_K,
+                                     mad_col="CorrectedLapTime")
+    laps_cleaning.summarise_flags(df, "全站(2022-2025 摩纳哥) ")
 
     # 性能保持率:按 (车手, 配方) 归一化,消除车手/赛车差异
     best = df.groupby(["Year", "Driver", "AbsCompound"])["CorrectedLapTime"].transform("min")
     df["PerfPct"] = best / df["CorrectedLapTime"] * 100.0
 
-    # 只保留参与拟合的行
-    df_fit = df[df["include_in_fit"]].copy()
-    return df_fit.reset_index(drop=True)
+    # 链路分离:
+    #   ① 拟合链路 = include_in_fit 子集(剔除发车/进站/中性化/重启/离群圈)
+    #   ② 模拟链路 = 全量,胎龄 TyreAge 连续累计(供 DP/MC 口径核对)
+    df_fit = laps_cleaning.fit_ready(df).reset_index(drop=True)
+    df_all = laps_cleaning.sim_ready(df).reset_index(drop=True)
+    return df_fit, df_all
 
 
 # ----------------------------------------------------------------- 拟合
@@ -536,9 +499,21 @@ def main():
     raw = load_all_laps()
 
     print("\n[2] 清洗数据 ...")
-    df = build_clean_table(raw)
-    print(f"  最终分析表: {len(df)} 行")
+    df, df_all = build_clean_table(raw)
+    print(f"  拟合链路(参与拟合): {len(df)} 行")
+    print(f"  模拟链路(全量含异常圈): {len(df_all)} 行 —— 胎龄 TyreAge 连续")
     print(f"  各配方样本: {df['AbsCompound'].value_counts().to_dict()}")
+
+    # 圈次清洗标记明细(便于核对"剔除的圈仍计入胎龄"这一口径)
+    keep_cols = ["Year", "Driver", "LapNumber", "Stint", "TyreAge",
+                 "AbsCompound", "圈状态", "LapTimeS", "CorrectedLapTime",
+                 "is_start_lap", "is_pit_in", "is_pit_out", "is_neutralised",
+                 "is_restart_lap", "is_outlier", "include_in_fit",
+                 "exclude_reason"]
+    detail_path = os.path.join(CHART_DIR, "07d_圈次清洗标记明细.csv")
+    df_all[[c for c in keep_cols if c in df_all.columns]].to_csv(
+        detail_path, index=False, encoding="utf-8-sig")
+    print(f"  已保存: {os.path.basename(detail_path)}")
 
     print("\n[3] 拟合三阶段模型(思路B+暖胎恢复:出场圈修正后参与拟合) ...")
     fit_results = {}

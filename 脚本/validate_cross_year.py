@@ -146,7 +146,8 @@ def main():
     print("=" * 55)
 
     raw = ftd.load_all_laps()
-    df = ftd.build_clean_table(raw)
+    # 拟合链路:统一清洗口径下 include_in_fit 的子集
+    df, _df_all = ftd.build_clean_table(raw)
 
     rows = []
     curves = {}

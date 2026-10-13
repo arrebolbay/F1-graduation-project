@@ -3,9 +3,17 @@
 """
 批量下载 2022-2025 摩纳哥站全部车手遥测数据并生成可视化图表。
 
+每个车手目录产出两类文件:
+    <车手>_monaco_<年份>_all_laps_telemetry.csv   遥测原始数据(已存在则跳过)
+    <车手>_monaco_<年份>_lap_status.csv           每圈状态表(TrackStatus/Stint/
+                                                  TyreLife/进出站...),每次重写
+    圈状态表是"异常圈判定"的唯一依据,由 plot_lec_monaco_speed.py 读取后
+    套用 脚本\\laps_cleaning.py 的统一口径(详见该模块文档)。
+
 用法:
     python batch_export.py                    # 全部年份,汇总图+单圈图
     python batch_export.py --skip-per-lap     # 只生成汇总图(快很多)
+    python batch_export.py --skip-charts      # 只导出 CSV(含圈状态表)
     python batch_export.py --years 2024 2025  # 只处理指定年份
 """
 
@@ -24,6 +32,9 @@ CACHE_DIR = os.path.join(PROJECT_DIR, "缓存", "f1_cache")
 YEARS = [2022, 2023, 2024, 2025]
 EVENT = "Monaco"
 SESSION_TYPE = "R"
+
+sys.path.insert(0, SCRIPT_DIR)
+import laps_cleaning  # noqa: E402  统一清洗口径(单一事实来源)
 
 
 def parse_args():
@@ -69,6 +80,36 @@ def export_telemetry(session, driver, year):
     combined = pd.concat(parts, ignore_index=True)
     combined.to_csv(csv_path, index=False)
     return csv_path
+
+
+# ------------------------------------------------------------------ 导出圈状态
+def export_lap_status(session, driver, year):
+    """导出该车手的**每圈状态表**,供 plot_lec_monaco_speed.py 用统一口径判异常圈。
+
+    与遥测 CSV 不同,本文件**每次运行都重写**(体积小,且是清洗口径的唯一依据)。
+    列: LapNumber / Driver / TrackStatus / Stint / TyreLife / FreshTyre /
+        Compound / PitInTime / PitOutTime / LapTime_s
+    """
+    out_dir = os.path.join(PROJECT_DIR, str(year), driver)
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{driver.lower()}_monaco_{year}_lap_status.csv")
+
+    laps = session.laps.pick_drivers(driver)
+    if laps.empty:
+        return None
+    cols = laps_cleaning.status_export_columns()
+    df = pd.DataFrame({"LapNumber": laps["LapNumber"].values,
+                       "Driver": driver,
+                       "TrackStatus": laps["TrackStatus"].astype(str).values,
+                       "Stint": laps["Stint"].values,
+                       "TyreLife": laps["TyreLife"].values,
+                       "FreshTyre": laps["FreshTyre"].values,
+                       "Compound": laps["Compound"].values,
+                       "PitInTime": laps["PitInTime"].values,
+                       "PitOutTime": laps["PitOutTime"].values,
+                       "LapTime_s": laps["LapTime"].dt.total_seconds().values})
+    df[cols].to_csv(path, index=False, encoding="utf-8-sig")
+    return path
 
 
 # ------------------------------------------------------------------ 生成图表
@@ -117,6 +158,9 @@ def main():
             csv_name = f"{drv.lower()}_monaco_{year}_all_laps_telemetry.csv"
             csv_path_guess = os.path.join(out_dir, csv_name)
             existed = os.path.exists(csv_path_guess)
+
+            # 圈状态表:清洗口径的唯一依据,每次重写(与遥测是否已存在无关)
+            export_lap_status(session, drv, year)
 
             csv_path = export_telemetry(session, drv, year)
             if csv_path is None:

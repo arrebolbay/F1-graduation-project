@@ -1,0 +1,21 @@
+﻿LapNumber,Driver,TrackStatus,Stint,TyreLife,FreshTyre,Compound,PitInTime,PitOutTime,LapTime_s
+1.0,MAG,12,1.0,1.0,True,WET,,0 days 02:04:50.335000,175.539
+2.0,MAG,14,1.0,2.0,True,WET,,,132.354
+3.0,MAG,1,1.0,3.0,True,WET,,,108.904
+4.0,MAG,1,1.0,4.0,True,WET,,,105.374
+5.0,MAG,1,1.0,5.0,True,WET,,,103.996
+6.0,MAG,12,1.0,6.0,True,WET,,,104.252
+7.0,MAG,1,1.0,7.0,True,WET,,,100.441
+8.0,MAG,1,1.0,8.0,True,WET,,,99.631
+9.0,MAG,1,1.0,9.0,True,WET,,,100.05
+10.0,MAG,12,1.0,10.0,True,WET,,,99.137
+11.0,MAG,12,1.0,11.0,True,WET,,,98.426
+12.0,MAG,1,1.0,12.0,True,WET,,,97.839
+13.0,MAG,1,1.0,13.0,True,WET,,,97.181
+14.0,MAG,1,1.0,14.0,True,WET,,,95.896
+15.0,MAG,1,1.0,15.0,True,WET,,,95.062
+16.0,MAG,1,1.0,16.0,True,WET,,,94.853
+17.0,MAG,12,1.0,17.0,True,WET,,,95.034
+18.0,MAG,1,1.0,18.0,True,WET,,,93.754
+19.0,MAG,1,1.0,19.0,True,WET,,,97.629
+20.0,MAG,12,1.0,20.0,True,WET,0 days 02:38:41.046000,,

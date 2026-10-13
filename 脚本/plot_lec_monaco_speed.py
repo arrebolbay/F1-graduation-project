@@ -68,6 +68,12 @@ STATIONARY_MIN_SECONDS = 15.0   # 静止超过该时长则判定为异常暂停(
 TRACK_LENGTH = 3337.0           # 摩纳哥赛道单圈长度(m),仅用于横轴参考
 Y_MAX = 320.0                   # 速度纵轴上限(km/h)
 
+# ----------------------------------------------------------------- 统一清洗口径
+sys.path.insert(0, BASE_DIR)
+import laps_cleaning  # noqa: E402  统一异常圈判定(单一事实来源)
+
+REASON_STOP = "遥测停车"        # 遥测静止 > 15 s(红旗停车)时追加的原因标签
+
 # ----------------------------------------------------------------- 车手中英文名映射
 _DRIVER_NAMES = {
     "ALB": "阿尔本", "ALO": "阿隆索", "ANT": "安东内利",
@@ -131,6 +137,99 @@ def resolve_outdir(out_dir, csv_path):
     if out_dir:
         return out_dir
     return os.path.dirname(os.path.abspath(csv_path))
+
+
+# ----------------------------------------------------------------- 统一异常圈判定
+def load_lap_status(csv_path):
+    """读取同目录的圈状态表 ``*_lap_status.csv``(由 batch_export.py 产出)。
+
+    返回 DataFrame 或 ``None``。缺失时整条链路退回"遥测静止"兜底判据,
+    并在 ``lap_summary.csv`` 的"异常原因"列注明。
+    """
+    path = laps_cleaning.status_csv_path(csv_path)
+    if not os.path.exists(path):
+        return None
+    try:
+        st = pd.read_csv(path)
+    except Exception as exc:                      # 读取失败不致命,退回兜底
+        print(f"[提示] 圈状态表读取失败({exc}),退回遥测判据")
+        return None
+    if st.empty or "TrackStatus" not in st.columns:
+        return None
+    print(f"圈状态表: {os.path.basename(path)}({len(st)} 圈)")
+    return st
+
+
+def apply_unified_flags(laps, status_df):
+    """把**统一口径**的异常圈判定写入每一圈的字典。
+
+    有圈状态表(首选)
+        套用 脚本\\laps_cleaning.py 的完整规则:发车圈 / 进站圈 /
+        中性化圈(黄·SC·红旗·VSC) / 重启圈 / 离群圈 —— 与
+        ``fit_tire_degradation.py``、``fit_lap_noise.py`` 完全一致。
+        因此同一圈号的"是否异常圈"不再因遥测是否可得而逐车手不一致。
+
+    无圈状态表(兜底)
+        只能用"遥测静止 > 15 s"(红旗停车)判定。
+
+    ``lap["abnormal"]`` 驱动图表配色,``lap["interrupted"]`` 仍表示遥测停车,
+    用于标注"已剔除停车 X s"。``lap["cum_age"]`` 是**模拟链路**胎龄:
+    全量累计,异常圈照样 +1。
+    """
+    if status_df is None:
+        for lap in laps:
+            lap["circuit_status"] = ""
+            lap["fit_eligible"] = not lap["interrupted"]
+            lap["abnormal"] = bool(lap["interrupted"])
+            lap["abnormal_reason"] = REASON_STOP if lap["interrupted"] else ""
+            lap["cum_age"] = None
+        print("[提示] 未找到圈状态表,异常圈判定退回「遥测静止」兜底口径"
+              "(运行 脚本\\batch_export.py 可补齐)")
+        return laps
+
+    st = status_df.copy()
+    st["LapNumber"] = st["LapNumber"].astype(int)
+    if "Driver" not in st.columns:
+        st["Driver"] = _DRIVER_CODE
+    st["Year"] = _YEAR
+    st = laps_cleaning.add_lap_flags(
+        st, lap_time_col="LapTime_s",
+        fuel_effect=laps_cleaning.FUEL_EFFECT_SEC_PER_LAP)
+    # 模拟链路胎龄:全量累计(不含任何剔除),异常圈照样 +1
+    if "TyreLife" in st.columns and st["TyreLife"].notna().any():
+        st["TyreAge"] = st["TyreLife"].fillna(1) - 1
+    else:
+        st["TyreAge"] = st.groupby("Stint").cumcount()
+
+    info = {int(r["LapNumber"]): r for _, r in st.iterrows()}
+    n_abnormal = 0
+    for lap in laps:
+        r = info.get(lap["lap"])
+        if r is None:
+            lap["circuit_status"] = ""
+            lap["fit_eligible"] = not lap["interrupted"]
+            lap["abnormal"] = bool(lap["interrupted"])
+            lap["abnormal_reason"] = (REASON_STOP if lap["interrupted"]
+                                      else "无圈状态数据")
+            lap["cum_age"] = None
+            continue
+        reasons = []
+        if r["exclude_reason"]:
+            reasons.append(r["exclude_reason"])
+        if lap["interrupted"] and REASON_STOP not in reasons:
+            reasons.append(REASON_STOP)
+        lap["circuit_status"] = str(r["圈状态"])
+        lap["abnormal_reason"] = "+".join(reasons)
+        lap["abnormal"] = bool(reasons)
+        lap["fit_eligible"] = bool(r["include_in_fit"]) and not lap["interrupted"]
+        lap["cum_age"] = (None if pd.isna(r["TyreAge"])
+                          else int(r["TyreAge"]))
+        if lap["abnormal"]:
+            n_abnormal += 1
+
+    print(f"统一口径异常圈: {n_abnormal} / {len(laps)} 圈"
+          f"(口径来源 脚本\\laps_cleaning.py)")
+    return laps
 
 
 def set_chinese_font():
@@ -265,7 +364,7 @@ def plot_all_laps_overlay(laps, out_path, x_axis, dpi):
 
     fig, ax = plt.subplots(figsize=(13, 7))
     for lap in laps:
-        special = lap["interrupted"]
+        special = lap["abnormal"]
         ax.plot(x_of(lap, x_axis), lap["speed"],
                 lw=1.4 if special else 0.9,
                 ls="--" if special else "-",
@@ -287,7 +386,7 @@ def plot_all_laps_overlay(laps, out_path, x_axis, dpi):
     sm.set_array([])
     cb = fig.colorbar(sm, ax=ax, pad=0.01)
     cb.set_label("圈数")
-    if any(lap["interrupted"] for lap in laps):
+    if any(lap["abnormal"] for lap in laps):
         ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(out_path, dpi=dpi)
@@ -305,14 +404,14 @@ def plot_per_lap_grid(laps, out_path, x_axis, dpi, ncols=8):
     axes = np.atleast_2d(axes)
     for idx, lap in enumerate(laps):
         ax = axes[idx // ncols, idx % ncols]
-        color = "crimson" if lap["interrupted"] else "#1f6fb2"
+        color = "crimson" if lap["abnormal"] else "#1f6fb2"
         ax.plot(x_of(lap, x_axis), lap["speed"], lw=0.9, color=color)
         ax.set_ylim(0, Y_MAX)
         ax.grid(alpha=0.3, ls=":")
         ax.set_title(f"第 {lap['lap']} 圈 | {lap['duration']:.1f} s | "
                      f"Vmax {lap['v_max']:.0f}",
                      fontsize=7, color=color,
-                     fontweight="bold" if lap["interrupted"] else "normal")
+                     fontweight="bold" if lap["abnormal"] else "normal")
     for idx in range(n, nrows * ncols):          # 多余的子图隐藏
         axes[idx // ncols, idx % ncols].axis("off")
     for c in range(ncols):
@@ -395,7 +494,7 @@ def plot_speed_heatmap(laps, out_path, dpi, bin_size=20.0):
 # ----------------------------------------------------------------- 图 4
 def plot_fastest_slowest(laps, out_path, x_axis, dpi, top_n=3, bin_size=10.0):
     """04 最快若干圈 / 最慢若干圈 + 全部有效圈平均曲线。"""
-    normal = [lap for lap in laps if not lap["interrupted"]]
+    normal = [lap for lap in laps if not lap["abnormal"]]
     if not normal:
         print("  跳过最快/最慢圈对比:没有正常圈数据")
         return
@@ -440,7 +539,7 @@ def plot_lap_speed_stats(laps, out_path, dpi):
     v_mean = [lap["v_mean"] for lap in laps]
     v_max = [lap["v_max"] for lap in laps]
     dur = [lap["duration"] for lap in laps]
-    colors = ["crimson" if lap["interrupted"] else "#4c72b0" for lap in laps]
+    colors = ["crimson" if lap["abnormal"] else "#4c72b0" for lap in laps]
 
     fig, ax = plt.subplots(figsize=(14, 6))
     ax.bar(nums, v_mean, color=colors, alpha=0.85, width=0.7,
@@ -476,7 +575,7 @@ def export_individual_laps(laps, out_dir, x_axis, dpi):
     lap_dir = os.path.join(out_dir, "laps")
     os.makedirs(lap_dir, exist_ok=True)
     for lap in laps:
-        color = "crimson" if lap["interrupted"] else "#1f6fb2"
+        color = "crimson" if lap["abnormal"] else "#1f6fb2"
         x = x_of(lap, x_axis)
         speed = lap["speed"]
 
@@ -503,6 +602,8 @@ def export_individual_laps(laps, out_dir, x_axis, dpi):
                  f"行驶距离 {lap['distance_total']:.0f} m"]
         if lap["interrupted"]:
             parts.append(f"已剔除停车 {lap['stopped_seconds']:.0f} s(红旗)")
+        if lap["abnormal_reason"]:
+            parts.append(f"异常圈: {lap['abnormal_reason']}")
         fig.suptitle(f"{_DRIVER_NAME} {_YEAR} 摩纳哥站 · 第 {lap['lap']} 圈时速曲线",
                      fontsize=13, color=color)
         ax.set_title(" | ".join(parts), fontsize=9)
@@ -514,7 +615,13 @@ def export_individual_laps(laps, out_dir, x_axis, dpi):
 
 # ----------------------------------------------------------------- 统计输出
 def save_summary(laps, out_path):
-    """把每圈的时长/最高速度/平均速度等统计写入 CSV。"""
+    """把每圈的时长/最高速度/平均速度等统计写入 CSV。
+
+    "是否异常圈"列采用**统一口径**(脚本\\laps_cleaning.py),不再由
+    遥测是否可得决定;另附"圈状态""异常原因""参与拟合""胎龄"四列:
+        * 参与拟合 = 拟合链路是否使用该圈(与 fit_tire_degradation.py 一致);
+        * 胎龄     = 模拟链路口径,**异常圈照样 +1**(红旗/SC/进站圈轮胎照样在磨)。
+    """
     rows = [{
         "圈号": lap["lap"],
         "有效行驶时长_s": round(lap["duration"], 2),
@@ -522,7 +629,11 @@ def save_summary(laps, out_path):
         "平均时速_kmh": round(lap["v_mean"], 1),
         "圈内行驶距离_m": round(lap["distance_total"], 1),
         "剔除停车_s": round(lap["stopped_seconds"], 1),
-        "是否异常圈": "是" if lap["interrupted"] else "否",
+        "圈状态": lap.get("circuit_status", ""),
+        "是否异常圈": "是" if lap["abnormal"] else "否",
+        "异常原因": lap["abnormal_reason"] or "—",
+        "参与拟合": "是" if lap["fit_eligible"] else "否",
+        "胎龄_圈": "" if lap.get("cum_age") is None else lap["cum_age"],
         "遥测行数": lap["rows"],
     } for lap in laps]
     summary = pd.DataFrame(rows)
@@ -544,13 +655,16 @@ def main(argv=None):
 
     df = load_telemetry(args.csv)
     laps = build_laps(df, args.stationary)
+    status_df = load_lap_status(args.csv)
+    laps = apply_unified_flags(laps, status_df)
     print(f"清洗完成:共 {len(laps)} 圈;横轴 = "
           f"{'圈内行驶距离 (m)' if args.x == 'distance' else '圈内有效行驶时间 (s)'}")
     for lap in laps:
-        if lap["interrupted"]:
-            print(f"    [异常圈] 第 {lap['lap']} 圈:剔除停车 "
-                  f"{lap['stopped_seconds']:.1f} s,有效行驶时长 "
-                  f"{lap['duration']:.1f} s")
+        if lap["abnormal_reason"]:
+            extra = (f",剔除停车 {lap['stopped_seconds']:.1f} s"
+                     if lap["interrupted"] else "")
+            print(f"    [异常圈] 第 {lap['lap']} 圈:{lap['abnormal_reason']}{extra}"
+                  f"(圈状态 {lap['circuit_status'] or '—'})")
     lap_set = {lap["lap"] for lap in laps}
     missing = sorted(set(range(1, max(lap_set) + 1)) - lap_set)
     if missing:
