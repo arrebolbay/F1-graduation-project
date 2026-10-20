@@ -120,7 +120,7 @@ python -m pip install -r requirements.txt
 ### 4.1 一键复现全部图表(推荐)
 
 ```powershell
-python 脚本\run_all.py                 # 主链路: 拟合 → DP → Stackelberg → 5 项验证
+python 脚本\run_all.py                 # 主链路 9 步: 拟合 → DP → Stackelberg → 5 项验证
 python 脚本\run_all.py --list          # 只看步骤表
 python 脚本\run_all.py --only dp,stackelberg
 python 脚本\run_all.py --from sensitivity

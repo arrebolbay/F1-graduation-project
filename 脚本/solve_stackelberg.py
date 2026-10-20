@@ -54,6 +54,7 @@ PIT_LOSS_VSC = core.PIT_LOSS_VSC             # VSC 下进站损失
 COMPOUNDS = core.COMPOUNDS
 COMPOUND_OFFSET = core.COMPOUND_OFFSET
 N_SIM = 10000                                # 蒙特卡洛模拟次数
+SEED = 20261020                              # 全局随机种子(np.random 流), 保证 11/12/13 可复现
 
 # 全场拟合参数(07_拟合参数表.csv,含物理合理性截断)
 PERF_PARAMS = core.load_pooled_params()
@@ -626,6 +627,10 @@ def plot_critical_point(critical_pit, out_path, grid=None, rates=None):
 
 # ----------------------------------------------------------------- 主程序
 def main():
+    # 固定全局随机种子: 各分支 MC 用的是 np.random 全局流, 不播种会让同一份参数
+    # 每次跑出 ±0.7pp 的抖动, 论文表格与 README 数字就对不上。收益矩阵内部另有
+    # 独立的 default_rng(seed), 两者互不影响。
+    np.random.seed(SEED)
     print("=" * 55)
     print(" 赛中Stackelberg博弈决策引擎")
     print("=" * 55)
