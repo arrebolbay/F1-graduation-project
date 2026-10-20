@@ -12,9 +12,16 @@ venv/
 web/.port
 web/history.jsonl
 
-# ---- AI 接口密钥(本地配置,严禁入库) ----
+# ---- 本地私有配置(密钥/口令,严禁入库) ----
 web/ai_config.local.json
 ai_config.local.json
+db_config.local.json
+*.local.json
+
+# ---- 运行日志(run_all.py 等) ----
+日志/
+_*.log
+_*.txt
 
 # ---- 系统 / 编辑器 ----
 .DS_Store

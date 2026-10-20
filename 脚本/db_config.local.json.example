@@ -1,0 +1,7 @@
+{
+  "host": "localhost",
+  "port": 3307,
+  "user": "arrebol",
+  "password": "在这里填你的 MySQL 密码",
+  "database": "F1-graduation-project"
+}

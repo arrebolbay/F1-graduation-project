@@ -66,6 +66,70 @@ def find_red_laps(laps):
     return sorted(red), sorted(sc)
 
 
+def red_time_account(current_lap=3, total_laps=None, stale_cap=20, offset_lap=2):
+    """红旗免费换胎的"时间账" —— 18 号表的主判据。
+
+    为什么不直接用 engine 的 two-branch 成功率
+    ------------------------------------------
+    ``engine.run_simulation(scenario="red")`` 的两个分支里,对手动作是**跟着我走**的
+    (我换他也换、我不换他也拖着不换),于是两边最终都回到"新胎 vs 新胎",成功率双双
+    逼近饱和(97%~98%),0.7pp 的差距落在蒙特卡洛噪声和鲁棒性区间内 —— 这种对照
+    回答不了"该不该换"。真正的问题是一个**反事实**:如果我换而绝大多数人不换,
+    我赚多少?
+
+    这里改用确定性时间账(与 :mod:`strategy_core` 同一条性能曲线):
+
+    * 不换: 继续用已跑 ``offset_lap`` 圈的软胎跑完剩余圈数;
+    * 换:   换上一套全新胎(2024 摩纳哥实际多为 C4/C3)跑完剩余圈数。
+
+    线性外推 76 圈远超软胎在摩纳哥的观测支撑区间(单段一般 ≤ 20 圈),所以同时给出
+    **保守口径**:20 圈后衰减封顶(不再变慢),作为下界。
+
+    另外,2024 赛季强制"两种配方"规则意味着"不换胎"并不能省掉停站,只是把停站
+    推到后面,还要再付一次正常进站损失(:data:`strategy_core.PIT_LOSS`)。
+
+    返回 ``{"remaining", "stay_linear", "stay_capped", "fresh": {comp: (total, delta)},
+    "best_comp", "delta_linear", "delta_capped", "verdict", "rule_penalty"}``。
+    """
+    import strategy_core as sc
+
+    total = int(sc.TOTAL_LAPS if total_laps is None else total_laps)
+    remaining = total - int(current_lap) + 1
+    params = sc.load_pooled_params()
+    base = sc.BASE_LAP_TIME
+    offs = sc.COMPOUND_OFFSET
+
+    stay_linear = sum(sc.lap_time("C5", offset_lap + k, base, params["C5"], offs)
+                      for k in range(remaining))
+    stay_capped = sum(sc.lap_time("C5", min(offset_lap + k, stale_cap), base,
+                                 params["C5"], offs)
+                      for k in range(remaining))
+
+    fresh = {}
+    for comp in sc.COMPOUNDS:
+        tot = sum(sc.lap_time(comp, k, base, params[comp], offs)
+                  for k in range(remaining))
+        fresh[comp] = (tot, stay_capped - tot)
+    best_comp = max(fresh, key=lambda c: fresh[c][1])
+    delta_capped = stay_capped - fresh[best_comp][0]
+    delta_linear = stay_linear - fresh[best_comp][0]
+
+    # 不换胎仍受"两种配方"强制规则约束: 后面还得再进一次站
+    rule_penalty = float(sc.PIT_LOSS)
+
+    return {
+        "remaining": remaining,
+        "stay_linear": stay_linear,
+        "stay_capped": stay_capped,
+        "fresh": fresh,
+        "best_comp": best_comp,
+        "delta_linear": delta_linear,
+        "delta_capped": delta_capped,
+        "verdict": "换胎" if delta_capped > 0 else "不换胎",
+        "rule_penalty": rule_penalty,
+    }
+
+
 def stint_table(laps):
     rows = []
     for drv, g in laps.groupby("Driver"):
@@ -123,16 +187,35 @@ def main():
     rec = model["recommendation"]
     branch_txt = " | ".join(
         f"{b['label']}={b['success_rate']}%" for b in model["branches"])
-    print(f"模型红旗场景: {branch_txt}")
-    print(f"模型建议: {rec['text'][:80]}")
-    agree = "是" if (changed / max(total_drivers, 1)) >= 0.5 and \
-        rec["branch"] == "change" else "否"
+    print(f"engine 红旗场景(同策略对照, 成功率已近饱和): {branch_txt}")
+    print(f"engine 建议: {rec['text'][:80]}")
 
-    rows.append({"车手": "—模型—", "红旗重启处换胎": f"建议:{rec['label']}",
-                 "全场stint数": "—", "stint结构": branch_txt})
+    # ---- 主判据: 确定性时间账(反事实对照, 不依赖蒙特卡洛饱和)
+    ta = red_time_account(current_lap=restart_lap or 3, offset_lap=2)
+    print(f"时间账(剩余 {ta['remaining']} 圈): 不换胎(线性) {ta['stay_linear']:.1f}s | "
+          f"不换胎(20圈后封顶) {ta['stay_capped']:.1f}s | "
+          f"换新{ta['best_comp']} {ta['fresh'][ta['best_comp']][0]:.1f}s")
+    print(f"时间账结论: {ta['verdict']} —— 线性外推优势 {ta['delta_linear']:.1f}s, "
+          f"保守口径仍 +{ta['delta_capped']:.1f}s; "
+          f"不换胎还受两种配方规则约束, 需再付一次 {ta['rule_penalty']:.1f}s 进站")
+
+    majority_change = (changed / max(total_drivers, 1)) >= 0.5
+    agree = "是" if (majority_change and ta["verdict"] == "换胎") else "否"
+
+    rows.append({"车手": "—模型·时间账—", "红旗重启处换胎": f"建议:{ta['verdict']}",
+                 "全场stint数": "—",
+                 "stint结构": (f"不换胎 {ta['stay_capped']:.1f}s(保守)/"
+                              f"{ta['stay_linear']:.1f}s(线性) vs "
+                              f"换新{ta['best_comp']} {ta['fresh'][ta['best_comp']][0]:.1f}s"
+                              f" → 净收益 +{ta['delta_capped']:.1f}s~"
+                              f"+{ta['delta_linear']:.1f}s;"
+                              f"另需一次 {ta['rule_penalty']:.1f}s 停站")})
+    rows.append({"车手": "—模型·MC—", "红旗重启处换胎": f"建议:{rec['label']}",
+                 "全场stint数": "—",
+                 "stint结构": branch_txt + "(对手同策略, 双向饱和, 仅作旁证)"})
     rows.append({"车手": "—对照—", "红旗重启处换胎": f"实际换胎 {changed}/{total_drivers}",
                  "全场stint数": "—",
-                 "stint结构": f"算法建议与多数车队一致: {agree}"})
+                 "stint结构": f"时间账建议与多数车队一致: {agree}"})
 
     df = pd.DataFrame(rows)
     csv_path = os.path.join(CHART_DIR, "18_历史回溯_2024红旗案例.csv")
@@ -161,7 +244,7 @@ def main():
     ax.set_xlabel("圈数")
     ax.set_title("2024 摩纳哥正赛 · 各车手实际轮胎策略时间线(色块=配方)\n"
                  f"红旗圈 L{red_laps} · 重启处换胎 {changed}/{total_drivers} 车手 · "
-                 f"模型建议「{rec['label']}」", fontsize=11)
+                 f"时间账建议「{ta['verdict']}」", fontsize=11)
     ax.grid(alpha=0.25, ls=":", axis="x")
     fig.tight_layout()
     png_path = os.path.join(CHART_DIR, "18_历史回溯_2024红旗案例.png")

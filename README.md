@@ -37,7 +37,13 @@ D:\Anaconda3\envs\F1_graduation_project\python.exe server.py --open
 ```
 F1毕设\
 ├─ README.md / 任务清单.md / LICENSE(MIT) / 推送更新.bat
+├─ requirements.txt                第三方依赖(pandas/numpy/matplotlib/scipy/fastf1)
+├─ tests\                          单元测试(标准库 unittest,30 项不变量)
+│   ├─ test_strategy_core.py       圈速归一 / DP 对账 / max_stops / Web 常数一致
+│   └─ test_laps_cleaning.py       清洗"只标记不删行" / 两条链路语义
 ├─ 脚本\                           全部 Python 脚本(通用工具,不按年份)
+│   ├─ run_all.py                  ★一键复现(按依赖顺序跑完整条链路)
+│   ├─ strategy_core.py            ★策略层单一事实来源(参数/圈速/DP/累计曲线)
 │   ├─ f1test.py                   FastF1 下载指定车手各圈遥测并导出 CSV
 │   ├─ F1test2.py                  维斯塔潘 vs 勒克莱尔 正赛圈速对比图
 │   ├─ csvtest.py                  CSV 数据概况速览(pandas)
@@ -47,17 +53,20 @@ F1毕设\
 │   ├─ fit_tire_degradation.py     轮胎衰减拟合(汇总 C3/C4/C5 + 分车手)
 │   ├─ fit_lap_noise.py            圈速波动 σ 估计 + 正态性检验
 │   ├─ solve_dp_strategy.py        DP 赛前最优策略(1停/强制两停)
-│   ├─ solve_stackelberg.py        Stackelberg 蒙特卡洛(离线版)
+│   ├─ solve_stackelberg.py        Stackelberg 蒙特卡洛 + 收益矩阵/均衡区域
 │   ├─ validate_cleaning.py        清洗口径一致性验证(发车/中性化/重启圈)
 │   ├─ validate_cross_year.py      交叉年份验证(留出年 MAE / R²)
 │   ├─ validate_mc_convergence.py  蒙特卡洛收敛性验证
 │   ├─ validate_sensitivity.py     敏感性分析(龙卷风图)
-│   └─ validate_history_2024.py    2024 红旗案例历史回溯验证
+│   ├─ validate_history_2024.py    2024 红旗案例历史回溯验证
+│   ├─ import_mysql.py             结果表导出到 MySQL(可选)
+│   └─ db_config.local.json.example 数据库配置模板(真实口令不入库)
 ├─ web\                            Web 交互系统(Python 标准库后端 + 原生前端)
 │   ├─ server.py / engine.py       HTTP 服务 / 核心引擎(DP+MC+轮胎库存+AI)
 │   ├─ 启动前端.bat                 一键启动
 │   └─ static\                     index.html / style.css / app.js
-├─ 图表\                           汇总图表与结果表(06~18 系列 CSV/PNG)
+├─ 图表\                           汇总图表与结果表(06~20 系列 CSV/PNG)
+├─ 日志\                           run_all.py 的运行日志(不入库)
 ├─ 2022\ … 2025\                   年份文件夹(直接在 F1毕设\ 下)
 │   └─ LEC\ … VER\                 车手三字母码
 │       ├─ lec_monaco_2024_all_laps_telemetry.csv   遥测原始数据(~13 MB/车手)
@@ -90,14 +99,48 @@ python f1test.py
 
 ## 三、环境依赖
 
+```powershell
+python -m pip install -r requirements.txt
+```
+
 | 用途 | 依赖 |
 | --- | --- |
-| 绘图 / 读 CSV | Python 3.12 + pandas + numpy + matplotlib(本机已具备) |
-| 重新下载遥测(`f1test.py`、`F1test2.py`、`batch_export.py`) | 额外需要 `pip install fastf1`(本机已装 fastf1 3.8.3) |
+| 绘图 / 读 CSV / 拟合 / 求解 | Python 3.12 + `pandas` + `numpy` + `matplotlib` + `scipy` |
+| 重新下载遥测(`f1test.py`、`F1test2.py`、`batch_export.py`) | 额外 `fastf1`(本机 3.8.3) |
+| 导出到 MySQL(`import_mysql.py`,可选) | 额外 `PyMySQL` |
+| **Web 交互系统(`web/`)** | **零第三方依赖**(Python 标准库 + 原生前端) |
 
 中文字体使用 Microsoft YaHei(脚本会自动探测,已确认无缺字警告)。
 
+> `脚本/db_config.local.json`(数据库口令)与 `web/ai_config.local.json` 均已在
+> `.gitignore` 中,入库模板见 `脚本/db_config.local.json.example`。
+
 ## 四、使用方式
+
+### 4.1 一键复现全部图表(推荐)
+
+```powershell
+python 脚本\run_all.py                 # 主链路: 拟合 → DP → Stackelberg → 5 项验证
+python 脚本\run_all.py --list          # 只看步骤表
+python 脚本\run_all.py --only dp,stackelberg
+python 脚本\run_all.py --from sensitivity
+python 脚本\run_all.py --with-export --with-charts   # 连同数据抓取与单圈图(慢)
+```
+
+`run_all.py` 按依赖顺序起独立子进程,日志写到 `日志/run_all_<时间戳>.log`;
+任何一步失败都会中断并打印退出码。**改过任何参数表(07/07b/07c)后请用它整链重跑**,
+否则 `图表/` 里会新旧口径混用。
+
+### 4.2 单元测试
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+30 项不变量测试覆盖:圈速按 peak 归一、分段闭区间圈数、**DP 目标值 == 累计曲线末值**、
+`max_stops`/`min_stops` 生效、清洗链路"只标记不删行"、Web 与离线常数一致。
+
+### 4.3 单脚本
 
 ```powershell
 cd G:\C\F1毕设\脚本
@@ -122,7 +165,7 @@ python validate_cleaning.py                    # 清洗口径一致性验证 →
 python fit_tire_degradation.py                 # 轮胎衰减拟合 → 07/07b/07c + 07d 圈次清洗标记明细
 python fit_lap_noise.py                        # 圈速波动 σ(只取拟合链路圈次)→ 14/14b
 python solve_dp_strategy.py                    # DP 赛前最优策略 → 08/09/10 系列
-python solve_stackelberg.py                    # Stackelberg 蒙特卡洛(离线)→ 11/12/13
+python solve_stackelberg.py                    # Stackelberg 蒙特卡洛 + 收益矩阵/均衡区域 → 11/12/13/19/20
 python validate_cross_year.py                  # 交叉年份验证 → 15
 python validate_mc_convergence.py              # 蒙特卡洛收敛性 → 16
 python validate_sensitivity.py                 # 敏感性分析 → 17
@@ -290,22 +333,28 @@ D:\Anaconda3\envs\F1_graduation_project\python.exe server.py --open   # 自动�
   界面明确标注来源,不冒充 AI 输出。
 - 天气选项、2024 SC 历史验证未纳入本次前端(依赖任务④的历史回溯数据,留作扩展)。
 
-## 八、算法验证(2026-10-01 首版,2026-10-13 统一清洗口径后全部复算)
+## 八、算法验证(2026-10-01 首版,2026-10-13 统一清洗口径,2026-10-20 策略层统一后全部复算)
 
-验证全部落地,产出在 `图表\15~18` 系列(Web"数据总览"可直接查看 CSV):
+验证全部落地,产出在 `图表\15~20` 系列(Web"数据总览"可直接查看 CSV):
 
 | 验证 | 方法 | 结论 |
 |---|---|---|
 | **清洗口径一致性** | 2024 摩纳哥全车手逐圈核对 L1 发车 / L2 中性化 / L3 重启圈的判定,并检查"拟合链路剔除、模拟链路不删行"两条链路 | 发车圈 **20/20**、中性化圈 **16/16**、重启圈 **16/16** 全车手一致 → 异常圈判定在下游脚本间**零分歧**(`15b_清洗口径验证_2024摩纳哥.csv`) |
 | **交叉年份验证** | 2022–23 训练→2024 验证;2022–24 训练→2025 验证(留出年,消除 hindsight bias) | C4 留出年 MAE 0.35s/圈、C3 0.77s/圈;2025 留出年 C4 1.40s、C5 2.25s;DP 首段分割 28/50 圈跨年一致;分年衰减率波动大(-0.32~+0.25 %/圈),实证鲁棒性分析必要 |
 | **蒙特卡洛收敛性** | N=100→100000 重复实验(Undercut·对手跟进) | 均值稳定 54.3%;经验 SE 与理论二项 SE 吻合(4.11pp→0.20pp);置信带宽 ∝1/√N |
-| **敏感性分析** | 进站损失±5s / 磨损系数±50% / 换胎均值±1s / 偏移±0.5s / σ×1.5(龙卷风图) | 磨损系数主导(DP ±30s、MC ±5pp);进站损失与换胎均值影响 ≤0.15pp;策略分割仅在偏移差 +0.5s 时改变 → 策略稳健 |
-| **历史回溯验证** | 2024 摩纳哥红旗案例:真实比赛 stint 结构 vs 模型红旗建议 | 红旗重启处 **16/20 车手免费换胎**,模型建议「红旗免费换胎」(68.9% vs 不换 6.9%) → **与实际车队决策一致** |
+| **敏感性分析** | 进站损失±5s / 磨损系数±50% / 换胎均值±1s / 偏移±0.5s / σ×1.5(龙卷风图) | 磨损系数主导;进站损失与换胎均值影响小;策略分割仅在偏移差 +0.5s 时改变 → 策略稳健 |
+| **历史回溯验证** | 2024 摩纳哥红旗案例:真实比赛 stint 结构 + 免费换胎的确定性时间账 | 实测 **16/20 车手在重启处换胎**;时间账:不换胎保守口径仍多花 **6.7s**(线性外推 176.9s),且"两种配方"规则还要求再付一次 19s 停站 → **换胎占优**,与实际一致 |
+| **博弈均衡(19/20)** | 2×2 收益矩阵(时间层 + 位置/超车层)→ 最佳反应、Nash、Stackelberg;差距 × 胎龄 90 个组合扫描 | 领先 0.8s、胎龄 30 圈时 Nash = **双方都继续跑**;先进站只赢 29.1%(进站让出位置,而摩纳哥单圈超车概率仅 0.5%~6%);**胎龄 ≥40 圈先进站成为均衡**,35 圈区间仅在落后(≤1s)时才值得先动 |
 
-> 复算说明(2026-10-13): 上表数值均在 `脚本\laps_cleaning.py` 统一清洗口径下重新生成。
-> 变化最大的是圈速波动 σ(1.05s → 0.74s)及其驱动的 MC 成功率(97.6% → 54.3%,
-> 同时车手级 σ 失真值被消除);轮胎参数(C4 deg 2.68%/100 圈不变、C5 11.36→11.63、
-> C3 2.62→2.22)与 DP 策略结构(C5 28 圈 → C4 50 圈)基本不变。
+> 复算说明(2026-10-20,策略层统一到 `脚本\strategy_core.py` 之后):
+>
+> * **圈速公式按各自 peak 归一** + 统一读 `07/07b/07c`,离线与 Web 现在解出同一个策略;
+> * 轮胎参数(C4 deg 3.56%/100 圈、C5 11.92%、C3 2.20%)全部带 **bootstrap 95% CI**,
+>   C4 的 CI 上界 7.45% 说明"硬胎也会衰"这一点在数据上并不陡;
+> * 圈速波动 σ = 0.7357s(去极值),MC 成功率因此回落到 54% 量级;
+> * `18` 号表的主判据从"MC 双分支成功率"(对手同策略 → 双向饱和到 97%~98%,无法区分)
+>   换成**确定性时间账**,才得到与 16/20 一致的"换胎"结论。
+
 
 ## 九、Git 与仓库维护
 

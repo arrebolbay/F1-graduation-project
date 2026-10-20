@@ -1,0 +1,22 @@
+# F1 摩纳哥 GP · 停站策略优化系统 —— Python 依赖
+#
+# 安装:
+#     python -m pip install -r requirements.txt
+#
+# 说明:
+#   * Web 演示系统(web/)只用 Python 标准库,不需要任何第三方包;
+#   * 下面这些包是"离线分析链路"(脚本/)需要的;
+#   * fastf1 会自行下载并缓存比赛数据到 缓存/f1_cache/,首次运行需要联网;
+#   * PyMySQL 仅在 脚本/import_mysql.py(导出到 MySQL)时需要,
+#     数据库口令走环境变量 F1_DB_PASSWORD 或 脚本/db_config.local.json,不入库。
+
+pandas>=2.0,<3.0
+numpy>=1.26,<3.0
+matplotlib>=3.7,<4.0
+scipy>=1.11,<2.0
+fastf1>=3.3,<4.0
+PyMySQL>=1.1,<2.0
+
+# 以下为 fastf1 的传递依赖,一般无需手动指定,列出来便于离线环境排查:
+# requests>=2.31
+# requests-cache>=1.0

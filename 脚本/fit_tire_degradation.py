@@ -180,11 +180,17 @@ INIT_GUESS = {
 BOUNDS = ([85, 0.2, 0.0], [100, 20, 0.2])
 
 
-def fit_one_compound(df_comp, compound):
-    """思路B:先用全新胎拟合基准曲线,再反推旧胎的等效胎龄,最后统一拟合。"""
+def fit_one_compound(df_comp, compound, n_boot=0, seed=42, min_count=3):
+    """思路B:先用全新胎拟合基准曲线,再反推旧胎的等效胎龄,最后统一拟合。
+
+    ``n_boot > 0`` 时额外做 stint 级自助重采样,给出 deg_rate 的 95% 置信区间
+    (只在全场汇总调用;车手级 90 次拟合并行跑 bootstrap 太慢)。
+    ``min_count`` 为每个胎龄点所需的最少圈数: 全场汇总用 3(稳健),
+    车手级用 2(否则 50 圈样本的车手也会被判"拟合失败"而整段回退全场参数)。
+    """
     binned = df_comp.groupby("TyreAge")["PerfPct"].agg(
         ["median", "mean", "std", "count"]).reset_index()
-    binned = binned[binned["count"] >= 3]
+    binned = binned[binned["count"] >= min_count]
     t_data = binned["TyreAge"].to_numpy(dtype=float)
     p_data = binned["median"].to_numpy(dtype=float)
     p_std = binned["std"].fillna(0).to_numpy(dtype=float)
@@ -236,7 +242,7 @@ def fit_one_compound(df_comp, compound):
     # ── 重新分箱(用修正后的胎龄) ──
     binned = df_comp.groupby("TyreAge")["PerfPct"].agg(
         ["median", "mean", "std", "count"]).reset_index()
-    binned = binned[binned["count"] >= 3]
+    binned = binned[binned["count"] >= min_count]
     t_data = binned["TyreAge"].to_numpy(dtype=float)
     p_data = binned["median"].to_numpy(dtype=float)
     p_std = binned["std"].fillna(0).to_numpy(dtype=float)
@@ -255,23 +261,43 @@ def fit_one_compound(df_comp, compound):
     t_peak = float(t_data[peak_idx])
     peak_val = float(trend[peak_idx])
 
-    # 衰减率:胎龄>5 的线性回归斜率
+    # 衰减率:胎龄>5 的**加权**线性回归斜率(权重 = 分箱样本数)
+    weights = binned["count"].to_numpy(dtype=float)
     deg_mask = t_data > 5
     if deg_mask.sum() >= 5:
-        slope, _ = np.polyfit(t_data[deg_mask], p_data[deg_mask], 1)
-        deg_rate = -slope  # 正数 = 每圈衰减 %
+        deg_rate = -weighted_slope(t_data[deg_mask], p_data[deg_mask],
+                                   weights[deg_mask])
+        deg_se = weighted_slope_se(t_data[deg_mask], p_data[deg_mask],
+                                   weights[deg_mask])
     else:
         deg_rate = 0.0
+        deg_se = float("inf")
+
+    params = {"P0": P0, "t_peak": t_peak, "peak": peak_val, "deg": deg_rate,
+              "peak_val": peak_val, "deg_rate": deg_rate}
+    stats = model_fit_stats(t_data, p_data, weights, params)
+    r2, rmse, r2_deg = stats["r2_all"], stats["rmse"], stats["r2_deg"]
+    ci_low, ci_high, n_boot_ok = bootstrap_deg_ci(df_comp, n_boot, seed)
+    n_stints = int(df_comp.groupby(["Year", "Driver", "Stint"]).ngroups) \
+        if "Stint" in df_comp.columns else 0
 
     print(f"    [{compound}] 样本{int(binned['count'].sum())}  "
           f"P0={P0:.1f}%  峰值={peak_val:.1f}%@{t_peak:.0f}圈  "
-          f"衰减={deg_rate:.3f}%/圈  范围={p_data.min():.1f}~{p_data.max():.1f}%")
+          f"衰减={deg_rate:.3f}%/圈  范围={p_data.min():.1f}~{p_data.max():.1f}%"
+          + (f"  R²(衰减段)={r2_deg:.3f} RMSE={rmse:.2f}"
+             if np.isfinite(r2_deg) else "")
+          + (f"  95%CI=[{ci_low:.3f},{ci_high:.3f}]"
+             if np.isfinite(ci_low) else ""))
 
     return {
         "P0": P0, "t_peak": t_peak, "peak_val": peak_val,
         "deg_rate": deg_rate,
         "t": t_data, "p": p_data, "trend": trend, "std": p_std,
         "n": int(binned["count"].sum()),
+        "r2": r2, "r2_deg": r2_deg, "rmse": rmse,
+        "deg_ci_low": ci_low, "deg_ci_high": ci_high,
+        "deg_se": deg_se,
+        "n_boot": n_boot_ok, "n_stints": n_stints,
     }
 
 
@@ -282,6 +308,161 @@ def perf_pct_from_params(t, params):
     if t <= t_peak:
         return P0 + (peak_val - P0) * (t / max(t_peak, 1))
     return peak_val - deg_rate * (t - t_peak)
+
+
+# ----------------------------------------------------------------- 不确定性量化
+def weighted_slope(t, y, w):
+    """加权最小二乘斜率(截距自由)。
+
+    旧版用 ``np.polyfit`` 等权回归:胎龄 3 圈的分箱和 200 圈的分箱权重相同,
+    长胎龄段(也是唯一能识别 deg 的段)反而被样本稀疏的分箱拉偏。
+    这里以分箱样本数为权重 —— 与"每个胎龄点的可靠性"一致。
+    """
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y, dtype=float)
+    w = np.asarray(w, dtype=float)
+    sw = w.sum()
+    if sw <= 0 or len(t) < 2:
+        return 0.0
+    t_bar = (w * t).sum() / sw
+    y_bar = (w * y).sum() / sw
+    denom = (w * (t - t_bar) ** 2).sum()
+    if denom <= 1e-12:
+        return 0.0
+    return float((w * (t - t_bar) * (y - y_bar)).sum() / denom)
+
+
+def weighted_slope_se(t, y, w):
+    """加权最小二乘斜率的标准误(用于经验贝叶斯收缩)。
+
+    SE² = σ̂² / Σ w(t−t̄)²,其中 σ̂² = Σ w·r² / (Σw − 2)。
+    胎龄点只有 2~3 个的稀疏拟合会得到极大的 SE —— 正是我们要"自动降权"的对象。
+    """
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y, dtype=float)
+    w = np.asarray(w, dtype=float)
+    sw = w.sum()
+    if len(t) < 4 or sw <= 0:
+        return float("inf")
+    t_bar = (w * t).sum() / sw
+    sxx = float((w * (t - t_bar) ** 2).sum())
+    if sxx <= 1e-12:
+        return float("inf")
+    slope = weighted_slope(t, y, w)
+    resid = y - (y.mean() + slope * (t - t.mean()))
+    dof = max(sw - 2.0, 1.0)
+    sigma2 = float((w * resid ** 2).sum() / dof)
+    se = float(np.sqrt(max(sigma2, 0.0) / sxx))
+    return se if np.isfinite(se) else float("inf")
+
+
+def model_fit_stats(t, y, w, params, t_deg=5.0):
+    """三阶段模型对分箱中位数的拟合优度。
+
+    返回 ``{"r2_all", "rmse", "r2_deg"}``:
+
+    * ``r2_all`` —— 全胎龄段的加权 R²(含暖胎段);
+    * ``r2_deg`` —— **衰减段(t > t_deg)的加权 R²**,即 deg_rate 真正生效的区间
+      (C3 的"暖胎段"其实是燃油/赛道演化的残差趋势,全段 R² 会被它拉负,
+      单看全段会误判"模型没用",故分开报告);
+    * ``rmse`` —— 加权残差标准差(单位:性能点)。
+    """
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y, dtype=float)
+    w = np.asarray(w, dtype=float)
+    nan = float("nan")
+    if len(t) < 2:
+        return {"r2_all": nan, "rmse": nan, "r2_deg": nan}
+
+    def _r2(mask):
+        sw = w[mask].sum()
+        if sw <= 0 or int(mask.sum()) < 2:
+            return nan
+        yhat = np.array([perf_pct_from_params(ti, params) for ti in t[mask]])
+        resid = y[mask] - yhat
+        ss_res = float((w[mask] * resid ** 2).sum())
+        y_bar = float((w[mask] * y[mask]).sum() / sw)
+        ss_tot = float((w[mask] * (y[mask] - y_bar) ** 2).sum())
+        return 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else nan
+
+    yhat = np.array([perf_pct_from_params(ti, params) for ti in t])
+    sw = float(w.sum())
+    rmse = float(np.sqrt((w * (y - yhat) ** 2).sum() / sw)) if sw > 0 else nan
+    return {"r2_all": _r2(np.ones_like(t, dtype=bool)),
+            "rmse": rmse,
+            "r2_deg": _r2(t > t_deg)}
+
+
+def bootstrap_deg_ci(df_comp, n_boot=500, seed=42, min_count=3, t_min=5):
+    """deg_rate 的 95% 置信区间(**stint 级**自助重采样)。
+
+    同一 stint 内的圈高度相关(轮胎是同一条、赛道状态连续),按"圈"重采样会
+    严重低估不确定性;按 (年份, 车手, stint) 整段重采样才是正确的聚类口径。
+    返回 ``(下界, 上界, 有效重采样次数)``,样本不足时返回 ``(nan, nan, 0)``。
+    """
+    if n_boot <= 0 or "Stint" not in df_comp.columns:
+        return float("nan"), float("nan"), 0
+    rng = np.random.default_rng(seed)
+    groups = [g for _, g in df_comp.groupby(["Year", "Driver", "Stint"])]
+    if len(groups) < 5:
+        return float("nan"), float("nan"), 0
+    vals = []
+    for _ in range(int(n_boot)):
+        pick = rng.integers(0, len(groups), len(groups))
+        d = pd.concat([groups[i] for i in pick], ignore_index=True)
+        b = d.groupby("TyreAge")["PerfPct"].agg(["median", "count"]).reset_index()
+        b = b[b["count"] >= min_count]
+        m = b["TyreAge"] > t_min
+        if int(m.sum()) < 4:
+            continue
+        slopes = -weighted_slope(b.loc[m, "TyreAge"], b.loc[m, "median"],
+                                 b.loc[m, "count"])
+        vals.append(slopes)
+    if len(vals) < 20:
+        return float("nan"), float("nan"), len(vals)
+    return (float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5)),
+            len(vals))
+
+
+def shrink_to_pooled(res, pooled, n, k=30, min_n=15, ci=None):
+    """经验贝叶斯收缩: 车手级参数按 ``w = n_eff/(n_eff+k)`` 向全场汇总收缩,并截断到全场 CI。
+
+    为什么要收缩: 07b 里出现 deg ≤ 0(轮胎越跑越快,如 BOT C3 −0.1157)与
+    "样本 6 圈却当独立结论"的行 —— 单个车手-配方的样本量(常 6~100 圈)不足以
+    支撑 4 个参数,直接丢进 DP 会解出 C4(73圈)→C5(5圈) 这类贴着约束边界的伪最优。
+
+    三处约束:
+      1. ``n_eff`` 用**参与拟合的分箱样本数**(``res["n"]``)而不是原始行数;
+         ``n_eff < min_n`` 时 w=0(完全采用全场参数)。
+      2. ``w = n_eff/(n_eff+k)``,k=30 圈 ≈ "30 圈的全场先验";100 圈样本 → w=0.77。
+      3. 混合后 ``deg`` 截断到 ``[0, ci_high]``(ci 为全场 deg 的 95% 置信区间):
+         超出数据所能支撑的范围就按上界截断 —— 否则 44 圈的稀疏拟合会给出
+         18%/百圈这种把 DP 解推向约束边界的伪信号。
+
+    注: 也尝试过用斜率标准误做"完全经验贝叶斯"(w=τ²/(τ²+SE²)),但 2~3 个胎龄点
+    的稀疏拟合会把残差方差低估、τ² 被放大到超过全场水平,反而失去收缩作用,
+    故改用上面这套参数更少、可复现的口径。
+    """
+    res = dict(res)
+    n_eff = int(res.get("n", n) or 0)
+    w = 0.0 if n_eff < min_n else float(n_eff) / (float(n_eff) + float(k))
+    for key in ("P0", "peak_val", "t_peak", "deg_rate"):
+        res[key] = w * float(res[key]) + (1.0 - w) * float(pooled[key])
+
+    hi = float("inf")
+    if ci is not None and len(ci) == 2 and np.isfinite(ci[1]):
+        hi = float(ci[1])
+    res["deg_rate"] = min(max(float(res["deg_rate"]), 0.0), hi)
+    res["shrink_w"] = round(w, 3)
+    res["n"] = n_eff
+    if n_eff < min_n:
+        res["source"] = "pooled(样本不足)"
+    elif res.get("source") == "pooled":
+        res["source"] = "pooled(拟合失败)"
+    else:
+        res["source"] = f"driver(收缩{w:.2f})"
+    return res
+
 
 
 DRIVER_NAMES = {
@@ -299,21 +480,32 @@ DRIVER_NAMES = {
 }
 
 
-def fit_per_driver(df, pooled_results):
-    """按车手拟合衰减曲线(样本<15 时退回全场曲线)。"""
+def fit_per_driver(df, pooled_results, k=30, min_n=15):
+    """按车手拟合衰减曲线,并向全场汇总做经验贝叶斯收缩。
+
+    流程: 单车手-配方拟合(样本<3 个胎龄点或失败 → 直接用全场参数)
+      → ``shrink_to_pooled``: w = n_eff/(n_eff+k) 混合车手估计与全场估计,
+        并把 deg 截断到全场 95% CI 内、非负。
+
+    收缩强度 k=30 圈: 40 圈样本 → w=0.57,100 圈 → w=0.77,328 圈 → w=0.92。
+    """
     driver_results = {}
     for driver in sorted(df["Driver"].unique()):
         driver_results[driver] = {}
         for comp in VALID_COMPOUNDS:
             sub = df[(df["Driver"] == driver) & (df["AbsCompound"] == comp)]
+            n = len(sub)
             try:
-                result = fit_one_compound(sub, comp)
+                result = fit_one_compound(sub, comp, min_count=2)
                 result["source"] = "driver"
             except (IndexError, ValueError):
                 result = dict(pooled_results[comp])
                 result["source"] = "pooled"
-                result["n"] = len(sub)
-            driver_results[driver][comp] = result
+                result["n"] = n
+            pooled = pooled_results[comp]
+            driver_results[driver][comp] = shrink_to_pooled(
+                result, pooled, n, k=k, min_n=min_n,
+                ci=(pooled.get("deg_ci_low"), pooled.get("deg_ci_high")))
     return driver_results
 
 
@@ -350,6 +542,11 @@ def plot_curves(fit_results, df, out_path):
 
 
 def save_params(fit_results, out_path):
+    """全场汇总参数表: 4 个参数 + 拟合优度 + deg 的 95% 置信区间。
+
+    旧版文件头写着"拟合参数 + R²",实际并没有输出 R²(纯文档与代码不一致);
+    现在 R²/RMSE/CI 都是真算出来的,敏感性分析可以直接引用 CI 而不是拍 ±50%。
+    """
     rows = []
     for comp in VALID_COMPOUNDS:
         r = fit_results[comp]
@@ -361,6 +558,13 @@ def save_params(fit_results, out_path):
             "deg_rate_pct_per_lap": round(r["deg_rate"], 4),
             "deg_rate_pct_per_100laps": round(r["deg_rate"] * 100, 2),
             "样本数": r["n"],
+            "stint数": r.get("n_stints", 0),
+            "deg_ci95_low": round(r["deg_ci_low"], 4) if np.isfinite(r.get("deg_ci_low", np.nan)) else "",
+            "deg_ci95_high": round(r["deg_ci_high"], 4) if np.isfinite(r.get("deg_ci_high", np.nan)) else "",
+            "R2": round(r["r2"], 4) if np.isfinite(r.get("r2", np.nan)) else "",
+            "R2_衰减段": round(r["r2_deg"], 4) if np.isfinite(r.get("r2_deg", np.nan)) else "",
+            "RMSE_性能点": round(r["rmse"], 4) if np.isfinite(r.get("rmse", np.nan)) else "",
+            "bootstrap次数": r.get("n_boot", 0),
         })
     pd.DataFrame(rows).to_csv(out_path, index=False, encoding="utf-8-sig")
     print(f"  已保存: {os.path.basename(out_path)}")
@@ -407,6 +611,7 @@ def save_driver_params(driver_results, out_path):
                 "peak_pct": round(r["peak_val"], 2),
                 "deg_rate_pct_per_lap": round(r["deg_rate"], 4),
                 "样本数": r["n"],
+                "收缩权重": r.get("shrink_w", ""),
                 "来源": r.get("source", "driver"),
             })
     pd.DataFrame(rows).to_csv(out_path, index=False, encoding="utf-8-sig")
@@ -517,12 +722,13 @@ def main():
 
     print("\n[3] 拟合三阶段模型(思路B+暖胎恢复:出场圈修正后参与拟合) ...")
     fit_results = {}
+    n_boot = int(os.getenv("F1_DEG_BOOT", "500"))
     for comp in VALID_COMPOUNDS:
         sub = df[df["AbsCompound"] == comp]
         if len(sub) < 10:
             print(f"    [{comp}] 样本不足({len(sub)}),跳过")
             continue
-        fit_results[comp] = fit_one_compound(sub, comp)
+        fit_results[comp] = fit_one_compound(sub, comp, n_boot=n_boot)
 
     print("\n[4] 按车手拟合衰减曲线 ...")
     driver_results = fit_per_driver(df, fit_results)

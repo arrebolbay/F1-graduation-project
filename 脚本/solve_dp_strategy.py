@@ -15,6 +15,7 @@ r"""
 """
 
 import os
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -37,20 +38,24 @@ for _n in ("Microsoft YaHei", "SimHei", "SimSun"):
     break
 plt.rcParams["axes.unicode_minus"] = False
 
-# ----------------------------------------------------------------- 参数
-TOTAL_LAPS = 78                  # 摩纳哥正赛圈数
-PIT_LOSS = 19                      # 进站损失(秒)(统一按用户指定)
-COMPOUNDS = ["C5", "C4", "C3"]   # 软/中/硬
-MAX_TYRE_AGE = 50                # 胎龄上限
-MIN_STINT_LAPS = 5               # 每段最少圈数(防止最后一圈进站钻规则空子)
-BASE_LAP_TIME = 75.0             # 100%性能时的基准圈速(秒)
+# ----------------------------------------------------------------- 统一口径
+# 全部常数 / 拟合参数 / 性能曲线 / 圈速公式 / DP 求解都来自 strategy_core
+# (策略层单一事实来源)。2026-10 统一前,本文件硬编码了一份 PERF_PARAMS 且用
+# ``base * 100 / perf``(未按峰值归一),与 web 端解出完全不同的"最优策略"
+# (离线 C4→C3,网页 C5→C4) —— 与清洗口径分叉是同一类问题。
+sys.path.insert(0, SCRIPT_DIR)
+import strategy_core as core  # noqa: E402
 
-# 性能曲线参数(从 fit_tire_degradation.py 拟合结果读取)
-PERF_PARAMS = {
-    "C5": {"P0": 97.7, "peak_val": 98.4, "t_peak": 1.0, "deg_rate": 0.114},
-    "C4": {"P0": 98.0, "peak_val": 98.5, "t_peak": 0.0, "deg_rate": 0.027},
-    "C3": {"P0": 98.3, "peak_val": 98.9, "t_peak": 18.0, "deg_rate": 0.026},
-}
+TOTAL_LAPS = core.TOTAL_LAPS
+PIT_LOSS = core.PIT_LOSS
+COMPOUNDS = core.COMPOUNDS
+MAX_TYRE_AGE = core.MAX_TYRE_AGE      # 仅参考上限,不进入约束(见 core 注释)
+MIN_STINT_LAPS = core.MIN_STINT_LAPS
+BASE_LAP_TIME = core.BASE_LAP_TIME    # 全场基准;按车手求解时用 07c 的基准圈速
+
+# 全场拟合参数: 读 07_拟合参数表.csv(含暖胎段/负衰减截断),缺失才用兜底值
+PERF_PARAMS = core.load_pooled_params()
+
 
 # 倍耐力官方策略(手动收集,格式: [(停站次数, [(起始配方, 圈数), ...]), ...])
 PIRELLI_STRATEGIES = [
@@ -60,151 +65,56 @@ PIRELLI_STRATEGIES = [
 
 
 def perf_pct(t, params):
-    """性能保持率(%)关于胎龄 t 的三阶段函数。"""
-    P0 = params["P0"]
-    peak_val = params["peak_val"]
-    t_peak = params["t_peak"]
-    deg_rate = params["deg_rate"]
-    if t <= t_peak:
-        return P0 + (peak_val - P0) * (t / max(t_peak, 1.0))
-    else:
-        return peak_val - deg_rate * (t - t_peak)
+    """性能保持率(%)(保留函数名以兼容旧调用,实现见 strategy_core)。"""
+    return core.perf_pct(t, core.normalize_params(params))
 
 
-def lap_time(compound_idx, tyre_age, params=None, base_time=None):
-    """给定配方和胎龄,返回圈速(秒)。base_time=None 时用全场基准。"""
-    if params is None:
-        params = PERF_PARAMS[COMPOUNDS[compound_idx]]
-    if base_time is None:
-        base_time = BASE_LAP_TIME
-    perf = perf_pct(tyre_age, params)
-    return base_time * 100.0 / max(perf, 50.0)
+def lap_time(compound, tyre_age, params=None, base_time=None):
+    """单圈圈速(秒): ``(基准 + 配方偏移) / (perf/peak)``,与 web 端同一公式。
+
+    ``compound`` 可为配方下标(旧调用习惯)或配方名。
+    """
+    comp = COMPOUNDS[compound] if isinstance(compound, int) else compound
+    return core.lap_time(comp, tyre_age, base_time or BASE_LAP_TIME,
+                         params or PERF_PARAMS[comp])
 
 
 # ----------------------------------------------------------------- DP求解器
-def solve_dp(start_compound_idx=0, perf_params=None, min_stops=1, base_time=None):
-    """动态规划求解最优停站策略。
+def solve_dp(start_compound_idx=0, perf_params=None, min_stops=1, base_time=None,
+             max_stops=None):
+    """动态规划求解(实现见 strategy_core.solve_dp)。
 
-    min_stops: 最少进站次数(1=正常规则,2=强制两停)
-    base_time: 基准圈速(秒),None 时用全场默认
+    max_stops=1 → 与 web 的 normal 模式(恰好 1 停)对齐;
+    max_stops=None → 纯时间最优(不限停站次数)。
     """
-    if perf_params is None:
-        perf_params = PERF_PARAMS
-    n_comp = len(COMPOUNDS)
-    INF = float("inf")
-
-    dp = {}
-    parent = {}
-    # state = (lap, compound, tyre_age, used_mask, n_stops)
-    start = (0, start_compound_idx, 0, 1 << start_compound_idx, 0)
-    dp[start] = 0.0
-
-    for lap in range(TOTAL_LAPS):
-        current_states = [s for s in dp if s[0] == lap]
-        for state in current_states:
-            _, comp, age, mask, n_stops = state
-            t = dp[state]
-            cp = perf_params[COMPOUNDS[comp]]
-
-            new_age = age + 1
-            new_state = (lap + 1, comp, new_age, mask, n_stops)
-            new_time = t + lap_time(comp, age, cp, base_time)
-            if new_state not in dp or new_time < dp[new_state]:
-                dp[new_state] = new_time
-                parent[new_state] = state
-
-            for new_comp in range(n_comp):
-                if new_comp == comp:
-                    continue
-                if age < MIN_STINT_LAPS:
-                    continue
-                if TOTAL_LAPS - (lap + 1) < MIN_STINT_LAPS:
-                    continue
-                new_state = (lap + 1, new_comp, 0,
-                             mask | (1 << new_comp), n_stops + 1)
-                new_time = t + lap_time(comp, age, cp, base_time) + PIT_LOSS
-                if new_state not in dp or new_time < dp[new_state]:
-                    dp[new_state] = new_time
-                    parent[new_state] = state
-
-    # 找最优终态:至少 min_stops 次进站 + 至少 2 种配方
-    best_time = INF
-    best_state = None
-    for state, t in dp.items():
-        lap, comp, age, mask, n_stops = state
-        if (lap == TOTAL_LAPS and n_stops >= min_stops
-                and bin(mask).count("1") >= 2):
-            if t < best_time:
-                best_time = t
-                best_state = state
-
-    if best_state is None:
-        return INF, []
-
-    path = []
-    state = best_state
-    while state in parent:
-        path.append(state)
-        state = parent[state]
-    path.append(state)
-    path.reverse()
-
-    return best_time, path
+    return core.solve_dp(start_compound_idx, perf_params or PERF_PARAMS,
+                         min_stops=min_stops, base_time=base_time,
+                         max_stops=max_stops)
 
 
 def extract_stints(path):
-    """从策略路径提取停站信息。"""
-    stints = []
-    current_comp = path[0][1]
-    start_lap = 0
-    for i in range(1, len(path)):
-        if path[i][1] != current_comp:
-            stints.append({
-                "compound": COMPOUNDS[current_comp],
-                "start_lap": start_lap,
-                "end_lap": path[i][0] - 1,
-                "laps": path[i][0] - start_lap,
-            })
-            current_comp = path[i][1]
-            start_lap = path[i][0]
-    # 最后一段
-    stints.append({
-        "compound": COMPOUNDS[current_comp],
-        "start_lap": start_lap,
-        "end_lap": TOTAL_LAPS,
-        "laps": TOTAL_LAPS - start_lap,
-    })
-    return stints
+    """从策略路径提取停站信息(闭区间 start/end,laps = end - start + 1)。"""
+    return core.extract_stints(path, total_laps=TOTAL_LAPS)
+
 
 
 # ----------------------------------------------------------------- 按车手求解
 def load_driver_params(csv_path):
-    """加载按车手的衰减参数表(07b_车手衰减参数表.csv)。"""
-    df = pd.read_csv(csv_path)
-    driver_params = {}
-    for _, row in df.iterrows():
-        drv = row["车手"]
-        comp = row["配方"]
-        if drv not in driver_params:
-            driver_params[drv] = {}
-        driver_params[drv][comp] = {
-            "P0": row["P0_pct"],
-            "peak_val": row["peak_pct"],
-            "t_peak": row["t_peak_laps"],
-            "deg_rate": row["deg_rate_pct_per_lap"],
-        }
-    return driver_params
+    """加载按车手的衰减参数表(07b) —— 读取 + 截断口径见 strategy_core。"""
+    return core.load_driver_params(os.path.dirname(os.path.abspath(csv_path)))
 
 
-def solve_dp_driver(driver, driver_params, min_stops=1, base_time=None):
-    """按车手的衰减曲线求解最优策略(尝试3种起步配方取最优)。"""
-    pp = driver_params[driver]
-    best_time, best_start, best_path = float("inf"), 0, []
-    for start_idx in range(len(COMPOUNDS)):
-        time, path = solve_dp(start_idx, pp, min_stops, base_time)
-        if path and time < best_time:
-            best_time, best_start, best_path = time, start_idx, path
-    return best_time, best_start, best_path
+def solve_dp_driver(driver, driver_params, min_stops=1, base_time=None,
+                    max_stops=None):
+    """按车手的衰减曲线求解最优策略(三种起步配方取最优)。
+
+    车手缺失的配方回退到全场汇总(``core.driver_compound_params``),
+    避免 07b 里某配方样本不足时直接 KeyError。
+    """
+    pp = core.driver_compound_params(driver_params, PERF_PARAMS, driver)
+    return core.solve_dp_best_start(pp, min_stops=min_stops,
+                                    base_time=base_time, max_stops=max_stops)
+
 
 
 DRIVER_NAMES = {
@@ -260,27 +170,35 @@ def plot_strategy_timeline(results, out_path):
     print(f"  已保存: {os.path.basename(out_path)}")
 
 
-def plot_cumulative_time(results, out_path):
-    """累计用时对比曲线。"""
+def plot_cumulative_time(results, out_path, base_time=None, params=None):
+    """累计用时对比曲线。
+
+    逐圈累计由 :func:`strategy_core.cumulative_curve` 计算 —— 该函数与 DP 目标
+    函数同源,进站损失计入新 stint 首圈,末值必须等于 DP 总用时。
+
+    旧版两个 bug(2026-10 修复):
+      1. ``range(start_lap, end_lap)`` 把闭区间当开区间,每段少画 1 圈
+         (整条曲线少 停站次数 圈,总圈数 ≠ 78);
+      2. 重算时没传 params / base_time,用的是硬编码默认参数 ——
+         图上累计时间与表里的总用时不是同一次计算。
+    """
     fig, ax = plt.subplots(figsize=(13, 7))
     colors = ["#e10600", "#1f6fb2", "#2ca25f"]
+    params = params or PERF_PARAMS
 
-    for idx, (total_time, start_idx, stints) in enumerate(results):
-        # 计算每圈的累计时间
-        cum_times = [0.0]
-        for stint in stints:
-            comp_idx = COMPOUNDS.index(stint["compound"])
-            for lap in range(stint["start_lap"], stint["end_lap"]):
-                age = lap - stint["start_lap"]
-                cum_times.append(cum_times[-1] + lap_time(comp_idx, age))
-        laps = list(range(len(cum_times)))
-        label = f"策略{idx + 1}: {'→'.join(s['compound'] for s in stints)}"
-        ax.plot(laps, cum_times, lw=2, color=colors[idx % len(colors)],
-                label=label)
+    for idx, (_total_time, _start_idx, stints) in enumerate(results):
+        laps, cum = core.cumulative_curve(stints, base_time, params)
+        label = (f"策略{idx + 1}: {'→'.join(s['compound'] for s in stints)}"
+                 f"(累计 {cum[-1]:.1f}s)")
+        ax.plot(laps, cum, lw=2, color=colors[idx % len(colors)], label=label)
+        for st in stints[1:]:
+            ax.axvline(st["start_lap"], color=colors[idx % len(colors)],
+                       lw=0.8, ls=":", alpha=0.6)
 
+    ax.set_xlim(0, TOTAL_LAPS)
     ax.set_xlabel("圈数", fontsize=12)
     ax.set_ylabel("累计用时 (秒)", fontsize=12)
-    ax.set_title("不同停站策略的累计用时对比", fontsize=14)
+    ax.set_title("不同停站策略的累计用时对比(竖虚线=进站圈)", fontsize=14)
     ax.legend(fontsize=9)
     ax.grid(alpha=0.3, ls=":")
     fig.tight_layout()
@@ -290,19 +208,35 @@ def plot_cumulative_time(results, out_path):
 
 
 # ----------------------------------------------------------------- Pirelli对比
-def compare_with_pirelli(dp_results, out_path):
-    """DP最优策略 vs 倍耐力官方策略 对比表。"""
+def compare_with_pirelli(dp_results, out_path, unrestricted=None):
+    """DP最优策略 vs 倍耐力官方策略 对比表。
+
+    ``unrestricted=(总秒数, stints)``: 不限停站次数(纯时间最优)的参考行 ——
+    用于说明"模型在 78 圈 / 19 秒进站损失下认为 2 停只比 1 停快零点几秒,
+    因而摩纳哥实践中普遍选择 1 停保位置"(纯时间模型不含赛道位置与超车难度)。
+    """
     rows = []
     for idx, (total_time, start_idx, stints) in enumerate(dp_results):
         n_stops = len(stints) - 1
         stint_str = " → ".join(f"{s['compound']}({s['laps']}圈)" for s in stints)
         total_str = f"{int(total_time // 3600)}:{int(total_time % 3600 // 60):02d}:{total_time % 60:04.1f}"
         rows.append({
-            "来源": f"DP策略{idx + 1}",
+            "来源": f"DP策略{idx + 1}(1停基准)",
             "停站次数": n_stops,
             "策略": stint_str,
             "总用时": total_str,
             "总秒数": round(total_time, 1),
+        })
+
+    if unrestricted:
+        u_total, u_stints = unrestricted
+        u_str = " → ".join(f"{s['compound']}({s['laps']}圈)" for s in u_stints)
+        rows.append({
+            "来源": "DP(不限停站·纯时间最优)",
+            "停站次数": len(u_stints) - 1,
+            "策略": u_str,
+            "总用时": f"{int(u_total // 3600)}:{int(u_total % 3600 // 60):02d}:{u_total % 60:04.1f}",
+            "总秒数": round(u_total, 1),
         })
 
     for idx, (n_stops, stint_list) in enumerate(PIRELLI_STRATEGIES):
@@ -379,10 +313,12 @@ def main():
     print(" 赛前最优停站策略求解(DP动态规划)")
     print("=" * 55)
 
-    # 尝试3种起步配方,各求最优策略(正常规则:至少1停)
+    # 尝试3种起步配方,各求最优策略
+    # max_stops=1 → "恰好 1 停",与 web 端 normal 模式(1 停基准)完全对齐;
+    # 不限停站次数的纯时间最优另算一次,作为 10 表的参考行。
     results = []
     for start_idx in range(len(COMPOUNDS)):
-        total_time, path = solve_dp(start_idx, min_stops=1)
+        total_time, path = solve_dp(start_idx, min_stops=1, max_stops=1)
         if path:
             stints = extract_stints(path)
             results.append((total_time, start_idx, stints))
@@ -395,6 +331,13 @@ def main():
     results.sort(key=lambda x: x[0])
     results = results[:3]
 
+    u_total, _u_idx, u_path = core.solve_dp_best_start(PERF_PARAMS, min_stops=1)
+    unrestricted = (u_total, extract_stints(u_path)) if u_path else None
+    if unrestricted:
+        print(f"  参考(不限停站): "
+              f"{core.format_strategy(unrestricted[1])} | {u_total:.1f}s")
+
+
     print(f"\n  Top {len(results)} 策略已选出")
 
     # 输出
@@ -404,7 +347,8 @@ def main():
     plot_cumulative_time(results,
                          os.path.join(CHART_DIR, "09_策略累计时间对比.png"))
     compare_with_pirelli(results,
-                         os.path.join(CHART_DIR, "10_策略对比表.csv"))
+                         os.path.join(CHART_DIR, "10_策略对比表.csv"),
+                         unrestricted=unrestricted)
 
     print("\n[按车手求解]")
     driver_csv = os.path.join(CHART_DIR, "07b_车手衰减参数表.csv")
@@ -419,7 +363,9 @@ def main():
         driver_strategies = {}
         for drv in sorted(driver_params):
             bt = base_times.get(drv, BASE_LAP_TIME)
-            tt, start_idx, path = solve_dp_driver(drv, driver_params, min_stops=1, base_time=bt)
+            tt, start_idx, path = solve_dp_driver(drv, driver_params,
+                                                  min_stops=1, base_time=bt,
+                                                  max_stops=1)
             if path:
                 driver_strategies[drv] = {
                     "total_time": tt,
@@ -435,7 +381,8 @@ def main():
         driver_strategies_2stop = {}
         for drv in sorted(driver_params):
             bt = base_times.get(drv, BASE_LAP_TIME)
-            tt2, _, path2 = solve_dp_driver(drv, driver_params, min_stops=2, base_time=bt)
+            tt2, _, path2 = solve_dp_driver(drv, driver_params, min_stops=2,
+                                            base_time=bt, max_stops=2)
             if path2:
                 driver_strategies_2stop[drv] = {
                     "total_time": tt2,
@@ -470,7 +417,7 @@ def main():
         print(df_cmp[["车手", "中文名", "正常策略", "两停策略", "两停损失_s"]].to_string(index=False))
     results_2stop = []
     for start_idx in range(len(COMPOUNDS)):
-        total_time, path = solve_dp(start_idx, min_stops=2)
+        total_time, path = solve_dp(start_idx, min_stops=2, max_stops=2)
         if path:
             stints = extract_stints(path)
             results_2stop.append((total_time, start_idx, stints))

@@ -27,6 +27,7 @@ F1 摩纳哥站进站策略优化系统 — Web 后端核心引擎
 import csv
 import json
 import os
+import sys
 import threading
 import time
 
@@ -38,9 +39,15 @@ PROJECT_DIR = os.path.dirname(WEB_DIR)
 CHART_DIR = os.path.join(PROJECT_DIR, "图表")
 HISTORY_FILE = os.path.join(WEB_DIR, "history.jsonl")
 
+# 策略层单一事实来源: 轮胎性能曲线 / 圈速公式 / 07·07b·07c 参数读取 / 物理截断
+# 与 脚本\solve_dp_strategy.py、solve_stackelberg.py、validate_cross_year.py 共用,
+# 避免"同一份参数解出不同最优策略"(2026-10 统一,详见 strategy_core 模块说明)。
+sys.path.insert(0, os.path.join(PROJECT_DIR, "脚本"))
+import strategy_core as core  # noqa: E402
+
 # ----------------------------------------------------------------- 全局参数
-TOTAL_LAPS = 78
-COMPOUNDS = ["C5", "C4", "C3"]
+TOTAL_LAPS = core.TOTAL_LAPS
+COMPOUNDS = list(core.COMPOUNDS)
 COMPOUND_COLORS = {"C5": "#e10600", "C4": "#ffd24d", "C3": "#b8bdc7"}
 COMPOUND_ZH = {"C5": "C5 软胎", "C4": "C4 中性胎", "C3": "C3 硬胎"}
 
@@ -136,35 +143,13 @@ class DataStore:
 
     # ---- 07_拟合参数表.csv(全场汇总,缺数据车手回退)
     def _load_pooled(self):
-        pooled = {}
-        path = os.path.join(CHART_DIR, "07_拟合参数表.csv")
-        for row in _read_csv(path):
-            comp = (row.get("配方") or "").strip()
-            if comp in COMPOUNDS:
-                pooled[comp] = {
-                    "P0": _f(row.get("P0_pct")),
-                    "t_peak": _f(row.get("t_peak_laps")),
-                    "peak": _f(row.get("peak_pct")),
-                    "deg": _f(row.get("deg_rate_pct_per_lap")),
-                }
-        return pooled
+        """读 07(实现与截断口径见 strategy_core.load_pooled_params)。"""
+        return core.load_pooled_params(CHART_DIR)
 
     # ---- 07b_车手衰减参数表.csv
     def _load_deg(self):
-        deg = {}
-        path = os.path.join(CHART_DIR, "07b_车手衰减参数表.csv")
-        for row in _read_csv(path):
-            code = (row.get("车手") or "").strip().upper()
-            comp = (row.get("配方") or "").strip()
-            if code and comp in COMPOUNDS:
-                deg.setdefault(code, {})[comp] = {
-                    "P0": _f(row.get("P0_pct")),
-                    "t_peak": _f(row.get("t_peak_laps")),
-                    "peak": _f(row.get("peak_pct")),
-                    "deg": _f(row.get("deg_rate_pct_per_lap")),
-                    "source": (row.get("来源") or "").strip(),
-                }
-        return deg
+        """读 07b(含 来源/样本数,实现见 strategy_core.load_driver_params)。"""
+        return core.load_driver_params(CHART_DIR)
 
     # ---- 07c_车手驾驶习惯指标.csv
     def _load_metrics(self):
@@ -276,20 +261,12 @@ STORE = DataStore()
 
 
 def _sanitize_deg(params):
-    """暖胎段物理合理性截断。
+    """暖胎段物理合理性截断 —— 统一由 :func:`strategy_core.sanitize_params` 实现。
 
-    拟合的 P0→peak 爬升段混入了发车/交通等混杂效应(个别拟合出现
-    t_peak 高达 22 圈、新胎比峰值慢 3~4 个点 → 新硬胎首圈竟慢 3 秒、
-    轮胎"越跑越快"20 余圈的非物理结果)。真实暖胎约为 1~3 圈、
-    落差 ≤1.2 个性能点,故引擎端统一截断:
-      t_peak ≤ 3 圈; P0 ≥ peak − 1.2。
-    衰减段斜率 deg 保持拟合值不变。
+    原实现只在 web 端截断(t_peak ≤ 3、P0 ≥ peak − 1.2),离线 DP 不截断,
+    是"同一车手两个最优策略"的成因之一;现 offline 与 engine 同源。
     """
-    p = dict(params)
-    peak = float(p.get("peak", 98.5))
-    p["t_peak"] = min(max(float(p.get("t_peak", 0.0)), 0.0), 3.0)
-    p["P0"] = max(float(p.get("P0", peak)), peak - 1.2)
-    return p
+    return core.sanitize_params(params)
 
 # ----------------------------------------------------------------- 圈速波动(实测标定)
 # 图表\14_圈速波动估计.csv(脚本\fit_lap_noise.py 产出):
@@ -339,31 +316,22 @@ def driver_noise(code):
 
 # ----------------------------------------------------------------- 轮胎模型
 def perf_pct(t, params):
-    """性能保持率(%): 暖胎上升 → 峰值 → 线性衰减(与主脚本一致)。"""
-    P0, peak, t_peak, deg = params["P0"], params["peak"], params["t_peak"], params["deg"]
-    if t <= t_peak:
-        return P0 + (peak - P0) * (t / max(t_peak, 1.0))
-    return peak - deg * (t - t_peak)
+    """性能保持率(%)(实现见 strategy_core.perf_pct,与离线脚本同源)。"""
+    return core.perf_pct(t, params)
 
 
 def lap_time(compound, tyre_age, base_time, params, offsets=None):
     """单圈圈速(秒) = (基准圈速 + 配方偏移) ÷ 归一化性能保持率。
 
-    perf 曲线按各自峰值归一(p/peak,1.0=峰值状态)——消除跨配方的拟合
-    水平噪声(直接用绝对 perf 会与配方偏移双重计数,曾导致 C3 被算成最快
-    配方);归一后 perf 只刻画"暖胎 + 衰减"形状,配方速度差由 offset 承担。
+    实现见 :func:`strategy_core.lap_time`;此处保留同名薄封装,
+    保证 engine 内部所有调用点与 脚本 侧共用同一份公式与参数默认值。
     """
-    offsets = offsets if offsets is not None else DEFAULT_PARAMS["compound_offset"]
-    p = perf_pct(tyre_age, params)
-    peak = max(float(params.get("peak", 98.5)), 50.0)
-    p_norm = max(p / peak, 0.5)
-    return (base_time + offsets.get(compound, 0.0)) / p_norm
+    return core.lap_time(compound, tyre_age, base_time, params, offsets)
 
 
 def lap_profile(compound, age0, n_laps, base_time, params, offsets=None):
     """一段连续 stint 的逐圈圈速数组(确定性部分)。"""
-    return np.array([lap_time(compound, age0 + k, base_time, params, offsets)
-                     for k in range(n_laps)], dtype=np.float64)
+    return core.lap_profile(compound, age0, n_laps, base_time, params, offsets)
 
 
 def sample_pit_times(rng, n, transit, p):
@@ -658,9 +626,10 @@ def _best_wear_by_compound(tires):
 
 
 # ----------------------------------------------------------------- 库存约束 DP
-PRERACE_PIT_LOSS = 19.0     # 与 脚本\solve_dp_strategy.py 的 PIT_LOSS 一致
-MIN_STINT_LAPS = 5          # 每段最少圈数(同 DP 脚本)
-MAX_TYRE_AGE = 50           # 单套轮胎最大使用圈数(同 DP 脚本 MAX_TYRE_AGE)
+# 三个常数统一取自 strategy_core(与离线 DP 完全同一口径)
+PRERACE_PIT_LOSS = core.PIT_LOSS        # 正常进站总损失(秒)
+MIN_STINT_LAPS = core.MIN_STINT_LAPS    # 每段最少圈数
+MAX_TYRE_AGE = core.MAX_TYRE_AGE        # 单套轮胎使用上限(=全赛程,即不设人为上限)
 
 
 def _group_cost_tables(groups, driver, offsets):
@@ -2021,6 +1990,8 @@ TABLE_SPECS = [
     ("mcconv", "蒙特卡洛收敛性验证", "16_蒙特卡洛收敛图.csv"),
     ("sens", "敏感性分析(龙卷风图数据)", "17_敏感性分析.csv"),
     ("history24", "历史回溯: 2024 摩纳哥红旗案例", "18_历史回溯_2024红旗案例.csv"),
+    ("payoff", "2×2 收益矩阵(领先 0.8s / 胎龄 30 圈, 含位置与超车难度)", "19_收益矩阵.csv"),
+    ("eqregion", "均衡区域(差距 × 胎龄 → 均衡动作)", "20_均衡区域.csv"),
 ]
 
 
